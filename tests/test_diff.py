@@ -93,3 +93,24 @@ def test_summarise_counts_each_kind():
     changes = diff([dev()], [dev(mac="11:22:33:44:55:66", ip="192.168.1.77")])
     assert "1 appeared" in summarise(changes)
     assert "1 vanished" in summarise(changes)
+
+
+def test_a_scan_that_skipped_ports_reports_no_port_changes():
+    """`--no-ports` must not read as "every port closed".
+
+    A device with nothing scanned and a device with nothing open are the same
+    empty tuple here, so this is the one case the data cannot distinguish on its
+    own - the caller has to say. Reporting it wrongly is a false alert, which is
+    worse than no alert.
+    """
+    was = [Device(mac="aa:bb:cc:00:00:01", ip="192.168.1.10", ports=(22, 80))]
+    now = [Device(mac="aa:bb:cc:00:00:01", ip="192.168.1.10", ports=())]
+
+    assert [c.kind for c in diff(was, now)] == ["port-closed"]
+    assert diff(was, now, compare_ports=False) == []
+
+
+def test_skipping_ports_still_reports_everything_else():
+    was = [Device(mac="aa:bb:cc:00:00:01", ip="192.168.1.10", ports=(22,))]
+    now = [Device(mac="aa:bb:cc:00:00:01", ip="192.168.1.99", ports=())]
+    assert [c.kind for c in diff(was, now, compare_ports=False)] == ["ip-changed"]
