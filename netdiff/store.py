@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS observations (
     ip        TEXT NOT NULL,
     vendor    TEXT NOT NULL DEFAULT '',
     hostname  TEXT NOT NULL DEFAULT '',
+    services  TEXT NOT NULL DEFAULT '',
     ports     TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (scan_id, mac)
 );
@@ -51,7 +52,30 @@ def connect(path=DEFAULT_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     return conn
+
+
+# Columns added after the first release. `CREATE TABLE IF NOT EXISTS` does
+# nothing to a table that already exists, and people have history going back
+# months, so a new column has to be added explicitly or every read of it fails
+# with "no such column" on exactly the databases worth keeping.
+ADDED_COLUMNS = (("observations", "services", "TEXT NOT NULL DEFAULT ''"),)
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to the current schema.
+
+    ponytail: a list of columns to add, not a numbered migration ladder. It is
+    idempotent and order-independent, which is all one added column needs. The
+    day a migration has to rename or backfill something, that is the day to
+    build the versioned thing - this will not stretch that far.
+    """
+    with conn:
+        for table, column, decl in ADDED_COLUMNS:
+            present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def _ports_to_text(ports) -> str:
@@ -73,10 +97,19 @@ def record_scan(conn: sqlite3.Connection, subnet: str, devices) -> int:
         )
         scan_id = cursor.lastrowid
         conn.executemany(
-            "INSERT INTO observations (scan_id, mac, ip, vendor, hostname, ports)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO observations"
+            " (scan_id, mac, ip, vendor, hostname, services, ports)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
-                (scan_id, d.mac, d.ip, d.vendor, d.hostname, _ports_to_text(d.ports))
+                (
+                    scan_id,
+                    d.mac,
+                    d.ip,
+                    d.vendor,
+                    d.hostname,
+                    d.services,
+                    _ports_to_text(d.ports),
+                )
                 for d in devices
             ],
         )
@@ -85,7 +118,8 @@ def record_scan(conn: sqlite3.Connection, subnet: str, devices) -> int:
 
 def load_scan(conn: sqlite3.Connection, scan_id: int) -> list[Device]:
     rows = conn.execute(
-        "SELECT mac, ip, vendor, hostname, ports FROM observations WHERE scan_id = ?",
+        "SELECT mac, ip, vendor, hostname, services, ports FROM observations"
+        " WHERE scan_id = ?",
         (scan_id,),
     ).fetchall()
     return [
@@ -94,6 +128,7 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> list[Device]:
             ip=r["ip"],
             vendor=r["vendor"],
             hostname=r["hostname"],
+            services=r["services"],
             ports=_ports_from_text(r["ports"]),
         )
         for r in rows
@@ -188,7 +223,7 @@ def inventory(conn: sqlite3.Connection) -> list[dict]:
     out = []
     for row in rows:
         latest = conn.execute(
-            "SELECT ip, vendor, hostname, ports FROM observations o"
+            "SELECT ip, vendor, hostname, services, ports FROM observations o"
             " JOIN scans s ON s.id = o.scan_id WHERE o.mac = ?"
             " ORDER BY s.id DESC LIMIT 1",
             (row["mac"],),
@@ -202,6 +237,7 @@ def inventory(conn: sqlite3.Connection) -> list[dict]:
                 "ip": latest["ip"],
                 "vendor": latest["vendor"],
                 "hostname": latest["hostname"],
+                "services": latest["services"],
                 "ports": _ports_from_text(latest["ports"]),
             }
         )

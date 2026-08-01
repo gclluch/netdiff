@@ -1,6 +1,8 @@
 """ARP parsing and persistence. No network is touched: parsing runs against
 captured command output, and the database is a temp file."""
 
+import sqlite3
+
 import pytest
 
 from netdiff import store
@@ -92,14 +94,99 @@ def conn(tmp_path):
 def test_scan_roundtrips_through_the_database(conn):
     devices = [
         Device(
-            mac="aa:bb:cc:00:00:01", ip="192.168.1.10", vendor="Acme", ports=(22, 80)
+            mac="aa:bb:cc:00:00:01",
+            ip="192.168.1.10",
+            vendor="Acme",
+            services="Chromecast",
+            ports=(22, 80),
         ),
         Device(mac="aa:bb:cc:00:00:02", ip="192.168.1.11", hostname="nas.local"),
     ]
     scan_id = store.record_scan(conn, "192.168.1.0/24", devices)
     assert store.load_scan(conn, scan_id) == devices, (
-        "ports and blanks must survive the trip"
+        "ports, services and blanks must survive the trip"
     )
+
+
+# The observations table as it shipped before `services` existed. Databases in
+# this shape are on real machines with months of history in them.
+SCHEMA_BEFORE_SERVICES = """
+CREATE TABLE scans (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    started   TEXT NOT NULL,
+    subnet    TEXT NOT NULL
+);
+CREATE TABLE observations (
+    scan_id   INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    mac       TEXT NOT NULL,
+    ip        TEXT NOT NULL,
+    vendor    TEXT NOT NULL DEFAULT '',
+    hostname  TEXT NOT NULL DEFAULT '',
+    ports     TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (scan_id, mac)
+);
+"""
+
+
+def old_database(path):
+    """A history file written by the previous release, with one scan in it."""
+    legacy = sqlite3.connect(path)
+    legacy.executescript(SCHEMA_BEFORE_SERVICES)
+    legacy.execute("INSERT INTO scans (started, subnet) VALUES ('2026-01-01', 'x')")
+    legacy.execute(
+        "INSERT INTO observations (scan_id, mac, ip, vendor, hostname, ports)"
+        " VALUES (1, 'aa:bb:cc:00:00:01', '192.168.1.10', 'Acme', 'nas.local', '22,80')"
+    )
+    legacy.commit()
+    legacy.close()
+    return path
+
+
+def columns_of(conn, table="observations"):
+    """Each column as name -> (type, notnull, default).
+
+    Deliberately not a list: `ALTER TABLE` appends and `SCHEMA` inserts, so a
+    migrated database orders its columns differently from a fresh one. Nothing
+    in netdiff selects `*`, so that difference is invisible - and pinning the
+    order here would be asserting something the code does not rely on.
+    """
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {r[1]: (r[2], r[3], r[4]) for r in rows}
+
+
+def test_an_existing_database_gains_the_services_column(tmp_path):
+    """CREATE TABLE IF NOT EXISTS does nothing to a table that already exists,
+    so without the migration every read of `services` fails on exactly the
+    databases worth keeping - the ones with history in them."""
+    path = old_database(tmp_path / "history.db")
+    devices = store.load_scan(store.connect(path), 1)
+
+    assert devices == [
+        Device(
+            mac="aa:bb:cc:00:00:01",
+            ip="192.168.1.10",
+            vendor="Acme",
+            hostname="nas.local",
+            ports=(22, 80),
+        )
+    ], "old rows read back intact, with an empty services"
+
+
+def test_migrating_twice_changes_nothing(tmp_path):
+    """Every `netdiff` command opens the database, so this runs constantly."""
+    path = old_database(tmp_path / "history.db")
+    store.connect(path).close()
+    conn = store.connect(path)
+
+    assert "services" in columns_of(conn)
+    assert store.load_scan(conn, 1)[0].hostname == "nas.local"
+
+
+def test_a_migrated_database_matches_a_fresh_one(tmp_path, conn):
+    """SCHEMA and ADDED_COLUMNS are two descriptions of one shape, and nothing
+    stops them drifting apart except this."""
+    migrated = store.connect(old_database(tmp_path / "old.db"))
+    assert columns_of(migrated) == columns_of(conn)
 
 
 def test_previous_devices_is_empty_for_the_very_first_scan(conn):
