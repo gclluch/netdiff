@@ -39,6 +39,10 @@ include = ["netdiff*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# `python -m pytest` puts the CWD on sys.path but bare `pytest` does not, so
+# without this the suite passes for whoever wrote it and fails for everyone
+# else. Declared rather than relying on how pytest happens to be invoked.
+pythonpath = ["."]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
