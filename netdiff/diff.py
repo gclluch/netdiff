@@ -45,11 +45,17 @@ class Change:
         return f"[{self.kind}] {label} {self.device.ip} {self.device.mac}{suffix}"
 
 
-def diff(previous, current) -> list[Change]:
+def diff(previous, current, compare_ports: bool = True) -> list[Change]:
     """Changes between two device lists, most significant first.
 
     Devices are matched by MAC, so a DHCP lease change is reported as
     `ip-changed` on one device rather than as a departure plus an arrival.
+
+    `compare_ports=False` for a scan that did not look at ports. A device with
+    no ports scanned and a device with no ports open are both an empty tuple
+    here, so without this a `--no-ports` run reports every previously-open port
+    as `port-closed` - a change that never happened, which is the one failure
+    mode this module exists to avoid.
     """
     before = {d.key(): d for d in previous}
     after = {d.key(): d for d in current}
@@ -78,6 +84,8 @@ def diff(previous, current) -> list[Change]:
                     f"{was.hostname or '-'} -> {now.hostname or '-'}",
                 )
             )
+        if not compare_ports:
+            continue
         opened = sorted(set(now.ports) - set(was.ports))
         closed = sorted(set(was.ports) - set(now.ports))
         if opened:
