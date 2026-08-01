@@ -17,6 +17,16 @@ Trust boundary: SSDP replies are unauthenticated UDP, so any host on the
 segment can forge one and point us at a URL of its choosing. We therefore only
 follow a LOCATION whose host is a literal private IP inside the subnet being
 audited, and we cap every body we read.
+
+That check has to survive every hop, not just the first. A description can name
+an absolute controlURL, which replaces the base URL outright, and any response
+can redirect. Both would move the fetch somewhere the check never saw, so the
+control URL is re-checked against the same subnet and redirects are refused.
+
+The strings that come back are not just fetched, they are printed: a finding's
+`verify` line is a command the report tells you to run. Anything from the
+network that reaches one is validated here, at the boundary, rather than
+escaped at each of the places it is rendered.
 """
 
 from __future__ import annotations
@@ -177,6 +187,13 @@ def parse_mapping(response: str):
     fields = {_localname(e.tag): (e.text or "").strip() for e in root.iter()}
     if not fields.get("NewExternalPort") or not fields.get("NewInternalClient"):
         return None
+    try:
+        # UPnP requires an address here. Anything else is a router telling us a
+        # story, and this value is rendered into a `verify` command the report
+        # tells the reader to paste into a shell.
+        ipaddress.ip_address(fields["NewInternalClient"])
+    except ValueError:
+        return None
     return Mapping(
         external_port=_to_int(fields["NewExternalPort"]),
         protocol=fields.get("NewProtocol", ""),
@@ -209,9 +226,24 @@ def ssdp_search(timeout: float = 3.0) -> list[str]:
     return replies
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow redirects.
+
+    We check a URL against the audited subnet before fetching it. Following a
+    redirect would fetch a URL nobody checked, which is the same hole with an
+    extra step. Returning None here makes urllib raise instead.
+    """
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _http_get(url: str, timeout: float) -> str:
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with _OPENER.open(url, timeout=timeout) as response:
             return response.read(MAX_BODY_BYTES).decode("utf-8", "replace")
     except (urllib.error.URLError, OSError, ValueError):
         return ""
@@ -230,7 +262,7 @@ def soap_post(control_url: str, service_type: str, index: int, timeout: float) -
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _OPENER.open(request, timeout=timeout) as response:
             return response.read(MAX_BODY_BYTES).decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         # The end of the table arrives as HTTP 500 carrying a SOAP fault, so
@@ -266,6 +298,10 @@ def probe_gateway(subnet: str, timeout: float = 3.0, search=ssdp_search):
         if service is None:
             continue
         control_url, service_type = service
+        if not is_safe_location(control_url, network):
+            # An absolute controlURL replaces the base URL entirely, so passing
+            # the check on LOCATION says nothing about where this points.
+            continue
         return Gateway(
             control_url=control_url,
             service_type=service_type,
