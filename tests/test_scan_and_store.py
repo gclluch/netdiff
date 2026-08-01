@@ -2,10 +2,11 @@
 captured command output, and the database is a temp file."""
 
 import sqlite3
+import time
 
 import pytest
 
-from netdiff import store
+from netdiff import cli, scan, store
 from netdiff.audit import Finding
 from netdiff.oui import is_randomised, lookup
 from netdiff.scan import Device, normalise_mac, parse_arp_output, read_arp_table
@@ -84,6 +85,67 @@ def test_randomised_macs_are_labelled_not_treated_as_unknown_vendors():
     assert is_randomised("a2:bb:cc:dd:ee:ff")
     assert not is_randomised("b8:27:eb:aa:bb:cc")
     assert lookup("a2:bb:cc:dd:ee:ff") == "randomised"
+
+
+# --- bounds and concurrency -------------------------------------------------
+# A scan is almost entirely waiting on timeouts. Sequentially that cost is the
+# sum over every device on the network, which is why these are timed rather than
+# only checked for their return value - a pool that quietly stops being used
+# still returns the right answer.
+
+
+def test_a_subnet_larger_than_one_broadcast_segment_is_refused(monkeypatch):
+    """And refused before anything is sent, not after 16.7M datagrams."""
+    monkeypatch.setattr(scan, "nudge", lambda *a, **k: pytest.fail("sent packets"))
+    with pytest.raises(ValueError, match="broadcast segment"):
+        scan.discover("10.0.0.0/8")
+
+
+def test_a_subnet_that_fits_is_not_refused(monkeypatch):
+    monkeypatch.setattr(scan, "nudge", lambda *a, **k: None)
+    monkeypatch.setattr(scan, "read_arp_table", dict)
+    assert scan.discover("192.168.1.0/24", settle=0) == []
+
+
+def test_a_bad_subnet_is_a_message_not_a_traceback(capsys):
+    assert cli.main(["scan", "not-a-subnet"]) == 2
+    assert capsys.readouterr().err.strip(), "the reason has to reach the user"
+
+
+def test_devices_are_scanned_concurrently(monkeypatch):
+    table = {f"192.168.1.{n}": f"aa:bb:cc:00:00:{n:02x}" for n in range(1, 13)}
+    monkeypatch.setattr(scan, "nudge", lambda *a, **k: None)
+    monkeypatch.setattr(scan, "read_arp_table", lambda: table)
+    monkeypatch.setattr(scan, "scan_ports", lambda ip, ports: time.sleep(0.2) or ())
+
+    start = time.monotonic()
+    devices = scan.discover(
+        "192.168.1.0/24", ports=(22,), settle=0, resolve_names=False
+    )
+    elapsed = time.monotonic() - start
+
+    assert [d.ip for d in devices] == sorted(
+        table, key=lambda ip: int(ip.split(".")[3])
+    )
+    assert elapsed < 1.0, f"12 devices x 0.2s took {elapsed:.1f}s - run sequentially?"
+
+
+def test_banners_are_gathered_concurrently(monkeypatch):
+    pairs = [("192.168.1.10", port) for port in range(8000, 8012)]
+    monkeypatch.setattr(
+        scan, "grab_banner", lambda ip, port, timeout=2.0: time.sleep(0.2) or f"{port}"
+    )
+
+    start = time.monotonic()
+    banners = scan.grab_banners(pairs)
+    elapsed = time.monotonic() - start
+
+    assert banners == {pair: str(pair[1]) for pair in pairs}
+    assert elapsed < 1.0, f"12 ports x 0.2s took {elapsed:.1f}s - run sequentially?"
+
+
+def test_no_open_ports_means_no_banner_work():
+    assert scan.grab_banners([]) == {}
 
 
 @pytest.fixture

@@ -13,7 +13,7 @@ import urllib.request
 from . import audit as audit_rules
 from . import mdns, oui, store, upnp
 from .diff import diff, summarise
-from .scan import discover, grab_banner
+from .scan import discover, grab_banners
 
 DEFAULT_PORTS = (22, 80, 443, 445, 554, 1883, 3389, 5000, 8080, 8443)
 
@@ -180,11 +180,9 @@ def cmd_audit(args) -> int:
         resolve_names=not args.no_resolve,
         services={} if args.no_mdns else mdns.discover(),
     )
-    banners = {
-        (device.ip, port): grab_banner(device.ip, port)
-        for device in devices
-        for port in device.ports
-    }
+    banners = grab_banners(
+        (device.ip, port) for device in devices for port in device.ports
+    )
     gateway = None if args.no_upnp else upnp.probe_gateway(args.subnet)
     findings = audit_rules.audit(devices, gateway, banners)
 
@@ -339,7 +337,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ValueError as exc:
+        # A subnet is user input and it is parsed deep in `discover`, so a typo
+        # or a /8 arrives here rather than at the argparse layer. Say what is
+        # wrong instead of printing a traceback at someone.
+        print(exc, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
