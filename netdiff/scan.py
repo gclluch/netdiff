@@ -37,6 +37,11 @@ _NEIGH_LINE = re.compile(
 
 INCOMPLETE = {"incomplete", "(incomplete)"}
 
+# Ports we speak HTTP to rather than waiting for a greeting. Shared with the
+# audit rules, which need the same list to know a challenge arrived over
+# cleartext rather than TLS.
+HTTP_PORTS = (80, 81, 591, 5000, 8000, 8008, 8080, 8081, 8888)
+
 
 @dataclass(frozen=True)
 class Device:
@@ -125,6 +130,30 @@ def scan_ports(ip: str, ports, timeout: float = 0.3) -> tuple[int, ...]:
         except OSError:
             continue
     return tuple(sorted(open_ports))
+
+
+def grab_banner(ip: str, port: int, timeout: float = 2.0) -> str:
+    """Read what a service volunteers about itself.
+
+    Most plaintext protocols greet you before they authenticate you, so
+    connecting and listening is the whole technique. HTTP is the exception - it
+    says nothing until asked - so we send HEAD, which requests headers and no
+    body and is the smallest thing we can ask for.
+
+    This never sends credentials and never writes anything a server would
+    store. A banner is what the service tells everyone who connects.
+    """
+    probe = b"HEAD / HTTP/1.0\r\n\r\n" if port in HTTP_PORTS else b""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            if sock.connect_ex((ip, port)) != 0:
+                return ""
+            if probe:
+                sock.sendall(probe)
+            return sock.recv(2048).decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
 
 
 def resolve_hostname(ip: str) -> str:

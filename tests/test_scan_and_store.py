@@ -4,6 +4,7 @@ captured command output, and the database is a temp file."""
 import pytest
 
 from netdiff import store
+from netdiff.audit import Finding
 from netdiff.oui import is_randomised, lookup
 from netdiff.scan import Device, normalise_mac, parse_arp_output, read_arp_table
 
@@ -136,3 +137,72 @@ def test_first_seen_survives_the_device_changing_ip(conn):
         conn, "192.168.1.0/24", [Device(mac="aa:bb:cc:00:00:01", ip="192.168.1.55")]
     )
     assert store.first_seen(conn, "aa:bb:cc:00:00:01") is not None
+
+
+def find(rule="plaintext-protocol", device="192.168.1.10", title="Telnet on port 23"):
+    return Finding(
+        rule=rule,
+        severity="high",
+        device=device,
+        title=title,
+        evidence="banner",
+        why="w",
+        fix="f",
+        verify="v",
+    )
+
+
+def test_findings_roundtrip_by_identity(conn):
+    scan_id = store.record_scan(conn, "192.168.1.0/24", [])
+    store.record_findings(conn, scan_id, [find()])
+    assert store.finding_keys(conn, scan_id) == {
+        ("plaintext-protocol", "192.168.1.10", "Telnet on port 23")
+    }
+
+
+def test_two_findings_of_one_rule_on_one_device_do_not_collide(conn):
+    """FTP and Telnet on the same host are two problems, not one."""
+    scan_id = store.record_scan(conn, "192.168.1.0/24", [])
+    store.record_findings(
+        conn, scan_id, [find(title="Telnet on port 23"), find(title="FTP on port 21")]
+    )
+    assert len(store.finding_keys(conn, scan_id)) == 2
+
+
+def test_a_repeat_audit_finds_nothing_new(conn):
+    first = store.record_scan(conn, "192.168.1.0/24", [])
+    store.record_findings(conn, first, [find()])
+    second = store.record_scan(conn, "192.168.1.0/24", [])
+    store.record_findings(conn, second, [find()])
+
+    seen = store.finding_keys(conn, store.last_audited_scan_id(conn, second))
+    assert all((f.rule, f.device, f.title) in seen for f in [find()]), (
+        "an unchanged network must not report NEW"
+    )
+
+
+def test_a_finding_that_appears_later_is_new(conn):
+    first = store.record_scan(conn, "192.168.1.0/24", [])
+    store.record_findings(conn, first, [find()])
+    second = store.record_scan(conn, "192.168.1.0/24", [])
+    fresh = find(rule="internet-exposed-service", title="port 8080 exposed")
+    store.record_findings(conn, second, [find(), fresh])
+
+    seen = store.finding_keys(conn, store.last_audited_scan_id(conn, second))
+    assert (fresh.rule, fresh.device, fresh.title) not in seen
+    assert (find().rule, find().device, find().title) in seen
+
+
+def test_a_plain_scan_between_audits_does_not_reset_the_baseline(conn):
+    """`netdiff scan` writes no findings; stepping back one scan would see none."""
+    audited = store.record_scan(conn, "192.168.1.0/24", [])
+    store.record_findings(conn, audited, [find()])
+    store.record_scan(conn, "192.168.1.0/24", [])  # a plain scan, no findings
+    latest = store.record_scan(conn, "192.168.1.0/24", [])
+
+    assert store.last_audited_scan_id(conn, latest) == audited
+
+
+def test_the_first_audit_ever_has_no_baseline(conn):
+    scan_id = store.record_scan(conn, "192.168.1.0/24", [])
+    assert store.last_audited_scan_id(conn, scan_id) is None

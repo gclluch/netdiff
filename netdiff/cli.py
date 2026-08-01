@@ -1,16 +1,19 @@
-"""Command line interface: scan, inventory, history, watch."""
+"""Command line interface: scan, audit, inventory, history."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import textwrap
 import urllib.error
 import urllib.request
 
-from . import oui, store
+from . import audit as audit_rules
+from . import oui, store, upnp
 from .diff import diff, summarise
-from .scan import discover
+from .scan import discover, grab_banner
 
 DEFAULT_PORTS = (22, 80, 443, 445, 554, 1883, 3389, 5000, 8080, 8443)
 
@@ -99,6 +102,128 @@ def cmd_scan(args) -> int:
     return 0
 
 
+def print_field(label: str, text: str, wrap: bool = True) -> None:
+    """One labelled block, indented under its finding.
+
+    `verify` is never wrapped: it is meant to be copied into a shell, and
+    reflowing a command silently corrupts it.
+    """
+    pad = " " * 14
+    if wrap:
+        print(
+            textwrap.fill(
+                text, 88, initial_indent=f"    {label:<9} ", subsequent_indent=pad
+            )
+        )
+        return
+    lines = text.split("\n")
+    print(f"    {label:<9} {lines[0]}")
+    for line in lines[1:]:
+        print(f"{pad}{line}")
+
+
+def print_lesson(finding, is_new: bool = False) -> None:
+    """Render one finding as the lesson it is, not as a severity-coloured row."""
+    print(f"  {finding.title}{'   [NEW]' if is_new else ''}")
+    print_field("evidence", finding.evidence, wrap=False)
+    print_field("why", finding.why)
+    print_field("fix", finding.fix)
+    print_field("verify", finding.verify, wrap=False)
+    print()
+
+
+def cmd_audit(args) -> int:
+    if args.explain:
+        spec = audit_rules.RULES.get(args.explain)
+        if spec is None:
+            known = ", ".join(sorted(audit_rules.RULES))
+            print(
+                f"unknown rule {args.explain!r}\nknown rules: {known}", file=sys.stderr
+            )
+            return 2
+
+        # Nothing has fired, so there is no device to name. Show the
+        # placeholders as readable stand-ins rather than leaking "{port}".
+        def placeholders(text):
+            return re.sub(r"\{(\w+)\}", lambda m: m.group(1).upper(), text)
+
+        print(f"{args.explain}  [{spec['severity']}]")
+        print(f"  {placeholders(spec['title'])}\n")
+        print_field("why", placeholders(spec["why"]))
+        print_field("fix", placeholders(spec["fix"]))
+        print_field("verify", placeholders(spec["verify"]), wrap=False)
+        return 0
+
+    if not args.subnet:
+        print(
+            "audit needs a subnet, e.g. netdiff audit 192.168.1.0/24", file=sys.stderr
+        )
+        return 2
+
+    devices = discover(
+        args.subnet,
+        ports=tuple(args.ports),
+        lookup_vendor=oui.lookup,
+        resolve_names=not args.no_resolve,
+    )
+    banners = {
+        (device.ip, port): grab_banner(device.ip, port)
+        for device in devices
+        for port in device.ports
+    }
+    gateway = None if args.no_upnp else upnp.probe_gateway(args.subnet)
+    findings = audit_rules.audit(devices, gateway, banners)
+
+    conn = store.connect(args.db)
+    scan_id = store.record_scan(conn, args.subnet, devices)
+    # Compare against the last scan that actually audited, not merely the last
+    # scan - otherwise a plain `netdiff scan` in between makes everything look new.
+    previous_id = store.last_audited_scan_id(conn, scan_id)
+    seen = store.finding_keys(conn, previous_id) if previous_id else set()
+    store.record_findings(conn, scan_id, findings)
+
+    # Nothing is "new" on the first audit; everything would be, which is noise.
+    annotated = [
+        (f, bool(seen) and (f.rule, f.device, f.title) not in seen) for f in findings
+    ]
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "scan_id": scan_id,
+                    "subnet": args.subnet,
+                    "summary": audit_rules.summarise(findings),
+                    "gateway": gateway.control_url if gateway else None,
+                    "mappings": [str(m) for m in gateway.mappings] if gateway else [],
+                    "findings": [dict(f.__dict__, is_new=new) for f, new in annotated],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"audit {scan_id}: {args.subnet} - {audit_rules.summarise(findings)}")
+    if gateway is None and not args.no_upnp:
+        print("no UPnP gateway answered - nothing here admits to forwarding ports")
+    print()
+    severity = ""
+    for finding, is_new in annotated:
+        if finding.severity != severity:
+            severity = finding.severity
+            print(severity.upper())
+        print_lesson(finding, is_new)
+
+    if not findings:
+        print("nothing to report - no devices answered, or none had open ports")
+    else:
+        print("Every finding above quotes the observation it rests on. Run the verify")
+        print("command yourself - do not take a scanner's word for anything.")
+
+    serious = any(f.severity in ("critical", "high") for f in findings)
+    return 1 if args.fail_on_finding and serious else 0
+
+
 def cmd_inventory(args) -> int:
     conn = store.connect(args.db)
     rows = store.inventory(conn)
@@ -155,6 +280,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("--json", action="store_true")
     scan.set_defaults(func=cmd_scan)
+
+    aud = sub.add_parser(
+        "audit",
+        help="what this network exposes, and why it matters",
+        description=(
+            "Read-only exposure audit. Never sends credentials, never writes to a "
+            "scanned host, and only ever reads the router's port-forwarding table."
+        ),
+    )
+    aud.add_argument("subnet", nargs="?", help="CIDR to audit, e.g. 192.168.1.0/24")
+    aud.add_argument("--ports", type=int, nargs="*", default=list(DEFAULT_PORTS))
+    aud.add_argument("--no-resolve", action="store_true", help="skip reverse DNS")
+    aud.add_argument(
+        "--no-upnp", action="store_true", help="skip the router port-forward check"
+    )
+    aud.add_argument(
+        "--explain", metavar="RULE", help="print the lesson for a rule and exit"
+    )
+    aud.add_argument(
+        "--fail-on-finding",
+        action="store_true",
+        help="exit 1 on any critical or high finding, for cron and CI",
+    )
+    aud.add_argument("--json", action="store_true")
+    aud.set_defaults(func=cmd_audit)
 
     inv = sub.add_parser("inventory", help="every device ever seen")
     inv.add_argument("--json", action="store_true")
