@@ -9,9 +9,11 @@ import sys
 import textwrap
 import urllib.error
 import urllib.request
+from datetime import datetime
+from pathlib import Path
 
 from . import audit as audit_rules
-from . import mdns, oui, store, upnp
+from . import mdns, oui, report, store, upnp
 from .diff import diff, summarise
 from .scan import discover, grab_banners
 
@@ -212,6 +214,18 @@ def cmd_audit(args) -> int:
         (f, bool(seen) and (f.rule, f.device, f.title) not in seen) for f in findings
     ]
 
+    if args.html:
+        page = report.render(
+            annotated,
+            args.subnet,
+            scan_id,
+            datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z"),
+            audit_rules.summarise(findings),
+        )
+        Path(args.html).write_text(page, encoding="utf-8")
+        print(f"wrote {args.html} - {len(findings)} finding(s), open it in a browser")
+        return 0
+
     if args.json:
         print(
             json.dumps(
@@ -338,6 +352,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="expand every finding into its evidence, why, fix and verify",
+    )
+    aud.add_argument(
+        "--html",
+        metavar="PATH",
+        help="write the report as one self-contained HTML file, for sending on",
     )
     aud.add_argument(
         "--explain", metavar="RULE", help="print the lesson for a rule and exit"
