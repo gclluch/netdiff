@@ -88,6 +88,8 @@ This rules out checks that would otherwise be easy. Anonymous-FTP detection need
 
 One trust boundary is worth naming: SSDP replies are unauthenticated UDP, so anything on your network can forge one and choose the URL netdiff fetches next. netdiff only follows a `LOCATION` whose host is a literal private address inside the subnet being audited, and caps every response it reads.
 
+That check holds for every hop, not just the first. A device description can name an absolute `controlURL` that discards the URL we vetted, and any response can redirect, so the control URL is re-checked against the same subnet and redirects are refused outright. The same reasoning covers what gets *printed*: a `verify` line is a command you are told to run, so every value from the network that reaches one - the control URL, a forward's internal client - is validated where it enters, not escaped where it is rendered.
+
 ## Why no dependencies, and why no root
 
 Most LAN scanners either shell out to `nmap` or send raw ARP frames with `scapy`, and raw frames need root. netdiff does neither.
