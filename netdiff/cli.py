@@ -15,7 +15,7 @@ from pathlib import Path
 from . import audit as audit_rules
 from . import mdns, oui, report, store, upnp
 from .diff import diff, summarise
-from .scan import discover, grab_banners
+from .scan import discover, grab_banners, local_subnet
 
 DEFAULT_PORTS = (22, 80, 443, 445, 554, 1883, 3389, 5000, 8080, 8443)
 
@@ -47,7 +47,20 @@ def device_label(hostname: str, vendor: str, services: str) -> str:
     return f"{main}  ({services})" if services and services != main else main
 
 
+def resolve_subnet(args) -> None:
+    """Fill in the subnet from the network we are on, and say that we did.
+
+    Announcing it is not decoration: a scan whose target was inferred has to
+    show its target, or the report is about a network the reader never chose.
+    """
+    if args.subnet:
+        return
+    args.subnet = local_subnet()
+    print(f"no subnet given - scanning {args.subnet}, the network this machine is on")
+
+
 def cmd_scan(args) -> int:
+    resolve_subnet(args)
     ports = () if args.no_ports else tuple(args.ports)
     devices = discover(
         args.subnet,
@@ -62,7 +75,7 @@ def cmd_scan(args) -> int:
     recent = store.recent_scan_ids(conn, limit=1)
     previous = store.load_scan(conn, recent[0]) if recent else []
     scan_id = store.record_scan(conn, args.subnet, devices)
-    changes = diff(previous, devices)
+    changes = diff(previous, devices, compare_ports=not args.no_ports)
 
     if args.json:
         print(
@@ -182,12 +195,7 @@ def cmd_audit(args) -> int:
         print_field("verify", placeholders(spec["verify"]), wrap=False)
         return 0
 
-    if not args.subnet:
-        print(
-            "audit needs a subnet, e.g. netdiff audit 192.168.1.0/24", file=sys.stderr
-        )
-        return 2
-
+    resolve_subnet(args)
     devices = discover(
         args.subnet,
         ports=tuple(args.ports),
@@ -314,7 +322,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     scan = sub.add_parser("scan", help="scan a subnet, record it, report changes")
-    scan.add_argument("subnet", help="CIDR to scan, e.g. 192.168.1.0/24")
+    scan.add_argument(
+        "subnet",
+        nargs="?",
+        help="CIDR to scan, e.g. 192.168.1.0/24 - defaults to the network you are on",
+    )
     scan.add_argument("--ports", type=int, nargs="*", default=list(DEFAULT_PORTS))
     scan.add_argument("--no-ports", action="store_true", help="skip the port scan")
     scan.add_argument("--no-resolve", action="store_true", help="skip reverse DNS")
@@ -338,7 +350,11 @@ def build_parser() -> argparse.ArgumentParser:
             "scanned host, and only ever reads the router's port-forwarding table."
         ),
     )
-    aud.add_argument("subnet", nargs="?", help="CIDR to audit, e.g. 192.168.1.0/24")
+    aud.add_argument(
+        "subnet",
+        nargs="?",
+        help="CIDR to audit, e.g. 192.168.1.0/24 - defaults to the network you are on",
+    )
     aud.add_argument("--ports", type=int, nargs="*", default=list(DEFAULT_PORTS))
     aud.add_argument("--no-resolve", action="store_true", help="skip reverse DNS")
     aud.add_argument(

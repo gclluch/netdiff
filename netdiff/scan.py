@@ -75,6 +75,68 @@ class Device:
         return self.mac
 
 
+# The address and mask of the interface we would actually use, in the three
+# shapes the usual commands print them: `ip -o -4 addr` gives a CIDR, macOS
+# ifconfig gives a hex mask, Linux ifconfig gives a dotted one.
+_INET_CIDR = re.compile(r"inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)")
+_MASK_HEX = re.compile(r"netmask\s+0x([0-9a-fA-F]{8})")
+_MASK_DOTTED = re.compile(r"netmask\s+(\d+\.\d+\.\d+\.\d+)")
+
+
+def local_address() -> str:
+    """Our own address on the network we would actually route through.
+
+    A UDP socket that is `connect`ed sends nothing - the kernel just picks the
+    route and binds a source address, which is exactly the question being asked.
+    The destination is TEST-NET-1, which is reserved and routed nowhere, so this
+    stays true even if it were ever to send.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect(("192.0.2.1", NUDGE_PORT))
+        return sock.getsockname()[0]
+
+
+def _prefix_length(text: str, ip: str):
+    """Mask width for `ip`, from whichever command's output this is."""
+    for line in text.splitlines():
+        if ip not in line:
+            continue
+        cidr = _INET_CIDR.search(line)
+        if cidr and cidr.group(1) == ip:
+            return int(cidr.group(2))
+        hexmask = _MASK_HEX.search(line)
+        if hexmask:
+            return bin(int(hexmask.group(1), 16)).count("1")
+        dotted = _MASK_DOTTED.search(line)
+        if dotted:
+            return sum(bin(int(o)).count("1") for o in dotted.group(1).split("."))
+    return None
+
+
+def local_subnet(runner=subprocess.run) -> str:
+    """The CIDR of the network this machine is on.
+
+    So that walking into somewhere new and running `netdiff scan` works without
+    first having to go and read your own IP settings. Guessing /24 would be right
+    most of the time, which is exactly the kind of nearly-true this tool refuses
+    elsewhere - if the mask cannot be read, say so and ask for one.
+    """
+    ip = local_address()
+    for cmd in (["ip", "-o", "-4", "addr"], ["ifconfig"]):
+        try:
+            proc = runner(cmd, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0 and proc.stdout:
+            prefix = _prefix_length(proc.stdout, ip)
+            if prefix:
+                return str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False))
+    raise ValueError(
+        f"could not work out the subnet for {ip} - pass one explicitly, "
+        f"e.g. netdiff scan {ip.rsplit('.', 1)[0]}.0/24"
+    )
+
+
 def normalise_mac(mac: str) -> str:
     """Canonical lower-case colon form, zero-padded.
 

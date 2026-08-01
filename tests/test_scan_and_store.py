@@ -107,6 +107,85 @@ def test_a_subnet_that_fits_is_not_refused(monkeypatch):
     assert scan.discover("192.168.1.0/24", settle=0) == []
 
 
+# --- working out where we are -----------------------------------------------
+
+IP_ADDR_OUTPUT = (
+    "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever\n"
+    "2: eth0  inet 192.168.1.190/24 brd 192.168.1.255 scope global eth0\n"
+)
+
+MACOS_IFCONFIG = """\
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+\tinet 127.0.0.1 netmask 0xff000000
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tinet 192.168.1.190 netmask 0xffffff00 broadcast 192.168.1.255
+"""
+
+LINUX_IFCONFIG = """\
+eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 192.168.1.190  netmask 255.255.255.0  broadcast 192.168.1.255
+"""
+
+
+@pytest.fixture
+def here(monkeypatch):
+    """Pretend this machine is 192.168.1.190, without touching a socket."""
+    monkeypatch.setattr(scan, "local_address", lambda: "192.168.1.190")
+
+
+def runner_for(output, ok=("ip", "ifconfig")):
+    def run(cmd, **kwargs):
+        if cmd[0] not in ok:
+            raise FileNotFoundError(cmd[0])
+
+        class Result:
+            returncode, stdout = 0, output
+
+        return Result()
+
+    return run
+
+
+@pytest.mark.parametrize(
+    "output", [IP_ADDR_OUTPUT, MACOS_IFCONFIG, LINUX_IFCONFIG], ids=["ip", "bsd", "gnu"]
+)
+def test_the_subnet_is_read_from_whichever_command_exists(here, output):
+    """A CIDR, a hex mask and a dotted mask all mean the same /24."""
+    assert scan.local_subnet(runner=runner_for(output)) == "192.168.1.0/24"
+
+
+def test_a_mask_that_is_not_a_24_is_not_rounded_to_one(here):
+    output = IP_ADDR_OUTPUT.replace("192.168.1.190/24", "192.168.1.190/22")
+    assert scan.local_subnet(runner=runner_for(output)) == "192.168.0.0/22"
+
+
+def test_an_unreadable_mask_asks_rather_than_assuming_24(here):
+    """Guessing would be right most of the time, which is the wrong kind of right."""
+    with pytest.raises(ValueError, match="pass one explicitly"):
+        scan.local_subnet(runner=runner_for("no interfaces here"))
+
+
+def test_the_loopback_line_is_not_mistaken_for_ours(here):
+    """127.0.0.1/8 appears first and would give the whole of 127/8."""
+    assert scan.local_subnet(runner=runner_for(MACOS_IFCONFIG)) == "192.168.1.0/24"
+
+
+def test_an_omitted_subnet_is_filled_in_and_announced(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "local_subnet", lambda: "10.1.2.0/24")
+    args = type("Args", (), {"subnet": None})()
+    cli.resolve_subnet(args)
+    assert args.subnet == "10.1.2.0/24"
+    assert "10.1.2.0/24" in capsys.readouterr().out, "a scan must show its target"
+
+
+def test_an_explicit_subnet_is_left_alone(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "local_subnet", lambda: pytest.fail("should not detect"))
+    args = type("Args", (), {"subnet": "192.168.9.0/24"})()
+    cli.resolve_subnet(args)
+    assert args.subnet == "192.168.9.0/24"
+    assert capsys.readouterr().out == ""
+
+
 def test_a_bad_subnet_is_a_message_not_a_traceback(capsys):
     assert cli.main(["scan", "not-a-subnet"]) == 2
     assert capsys.readouterr().err.strip(), "the reason has to reach the user"
