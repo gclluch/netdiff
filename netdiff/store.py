@@ -29,6 +29,15 @@ CREATE TABLE IF NOT EXISTS observations (
     PRIMARY KEY (scan_id, mac)
 );
 CREATE INDEX IF NOT EXISTS observations_mac ON observations(mac);
+CREATE TABLE IF NOT EXISTS findings (
+    scan_id   INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+    rule      TEXT NOT NULL,
+    severity  TEXT NOT NULL,
+    device    TEXT NOT NULL,
+    title     TEXT NOT NULL,
+    evidence  TEXT NOT NULL,
+    PRIMARY KEY (scan_id, rule, device, title)
+);
 """
 
 DEFAULT_PATH = Path.home() / ".netdiff" / "history.db"
@@ -89,6 +98,53 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> list[Device]:
         )
         for r in rows
     ]
+
+
+def record_findings(conn: sqlite3.Connection, scan_id: int, findings) -> None:
+    """Persist the findings of one audit.
+
+    Only what varies is stored. The teaching text lives in `audit.RULES` and is
+    looked up by rule id at render time, so improving an explanation improves it
+    everywhere including in reports already on disk.
+    """
+    with conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO findings"
+            " (scan_id, rule, severity, device, title, evidence)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (scan_id, f.rule, f.severity, f.device, f.title, f.evidence)
+                for f in findings
+            ],
+        )
+
+
+def finding_keys(conn: sqlite3.Connection, scan_id: int) -> set:
+    """Identity of each finding in a scan, for spotting what is new."""
+    rows = conn.execute(
+        "SELECT rule, device, title FROM findings WHERE scan_id = ?", (scan_id,)
+    ).fetchall()
+    return {(r["rule"], r["device"], r["title"]) for r in rows}
+
+
+def last_audited_scan_id(conn: sqlite3.Connection, before_scan_id: int):
+    """The most recent earlier scan that actually recorded findings.
+
+    Plain `netdiff scan` writes no findings, so stepping back one scan would
+    often compare against an empty set and call everything new.
+
+    ponytail: an audit that found literally nothing is indistinguishable from a
+    plain scan here, so a finding that clears and later returns is not marked
+    NEW. Reaching that needs a network with no open ports and no gateway, since
+    `open-ports-noted` fires otherwise. Add an `audits(scan_id)` table if it
+    ever matters.
+    """
+    row = conn.execute(
+        "SELECT DISTINCT scan_id FROM findings WHERE scan_id < ?"
+        " ORDER BY scan_id DESC LIMIT 1",
+        (before_scan_id,),
+    ).fetchone()
+    return row["scan_id"] if row else None
 
 
 def recent_scan_ids(conn: sqlite3.Connection, limit: int = 2) -> list[int]:
