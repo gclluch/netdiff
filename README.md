@@ -30,6 +30,23 @@ Most people assume NAT is a firewall - nothing outside can reach in unless they 
 $ netdiff audit 192.168.1.0/24
 audit 12: 192.168.1.0/24 - 1 critical, 2 high, 1 medium, 1 info
 
+    critical  nas.local (192.168.1.23:8080) is reachable from the internet on port 8080   [NEW]
+    high      Telnet on port 23 sends usernames, passwords and every keystroke of the
+              session in cleartext
+    high      port 8080 asks for a password over unencrypted HTTP
+    medium    the router lets any device on the LAN open its firewall
+    info      7 open port(s) observed, and not reported as problems
+
+-v adds the evidence each line rests on, why it matters, how to fix it,
+and a command you can run yourself to confirm it.
+```
+
+A report nobody finishes reading teaches nothing, so depth is something you ask for. `-v` expands every line above into the finding it stands for:
+
+```console
+$ netdiff audit 192.168.1.0/24 -v
+audit 12: 192.168.1.0/24 - 1 critical, 2 high, 1 medium, 1 info
+
 CRITICAL
   nas.local (192.168.1.23:8080) is reachable from the internet on port 8080   [NEW]
     evidence  *:8080/tcp -> 192.168.1.23:8080 (transmission) - and 192.168.1.23:8080 answered our scan
@@ -50,8 +67,9 @@ CRITICAL
 Every finding carries the observation that produced it, what an attacker gains, how to fix it, and **a command you run yourself to confirm it**. You should not have to take a scanner's word for anything.
 
 ```bash
-netdiff audit 192.168.1.0/24                  # full report
-netdiff audit 192.168.1.0/24 --json           # same thing, machine-readable
+netdiff audit 192.168.1.0/24                  # a headline per finding
+netdiff audit 192.168.1.0/24 -v               # each one expanded into its lesson
+netdiff audit 192.168.1.0/24 --json           # every field, machine-readable
 netdiff audit 192.168.1.0/24 --no-upnp        # skip the router check
 netdiff audit --explain upnp-control-open     # read a lesson without scanning
 netdiff audit 192.168.1.0/24 --fail-on-finding   # exit 1 on critical/high, for cron

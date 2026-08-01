@@ -135,6 +135,19 @@ def print_field(label: str, text: str, wrap: bool = True) -> None:
         print(f"{pad}{line}")
 
 
+def print_headline(finding, is_new: bool = False) -> None:
+    """One finding, one line, severity first.
+
+    The default view. Fifteen findings rendered as fifteen full lessons is a
+    wall of text people stop reading, and a lesson nobody reads teaches nothing
+    - so depth is something you ask for with `-v` rather than something you have
+    to wade through. The severity rides on the line rather than in a heading
+    above a group, so any single line still says what it is once it has been
+    copied somewhere else.
+    """
+    print_field(finding.severity, f"{finding.title}{'   [NEW]' if is_new else ''}")
+
+
 def print_lesson(finding, is_new: bool = False) -> None:
     """Render one finding as the lesson it is, not as a severity-coloured row."""
     print(f"  {finding.title}{'   [NEW]' if is_new else ''}")
@@ -221,6 +234,9 @@ def cmd_audit(args) -> int:
     print()
     severity = ""
     for finding, is_new in annotated:
+        if not args.verbose:
+            print_headline(finding, is_new)
+            continue
         if finding.severity != severity:
             severity = finding.severity
             print(severity.upper())
@@ -228,9 +244,13 @@ def cmd_audit(args) -> int:
 
     if not findings:
         print("nothing to report - no devices answered, or none had open ports")
-    else:
+    elif args.verbose:
         print("Every finding above quotes the observation it rests on. Run the verify")
         print("command yourself - do not take a scanner's word for anything.")
+    else:
+        print()
+        print("-v adds the evidence each line rests on, why it matters, how to fix it,")
+        print("and a command you can run yourself to confirm it.")
 
     serious = any(f.severity in ("critical", "high") for f in findings)
     return 1 if args.fail_on_finding and serious else 0
@@ -312,6 +332,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aud.add_argument(
         "--no-upnp", action="store_true", help="skip the router port-forward check"
+    )
+    aud.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="expand every finding into its evidence, why, fix and verify",
     )
     aud.add_argument(
         "--explain", metavar="RULE", help="print the lesson for a rule and exit"
