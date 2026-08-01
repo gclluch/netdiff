@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 
 from . import audit as audit_rules
-from . import oui, store, upnp
+from . import mdns, oui, store, upnp
 from .diff import diff, summarise
 from .scan import discover, grab_banner
 
@@ -33,6 +33,18 @@ def send_webhook(url: str, payload: dict, timeout: float = 10) -> str:
     return ""
 
 
+def device_label(hostname: str, vendor: str, services: str) -> str:
+    """What to call a device, best evidence first.
+
+    A hostname is what a device was named; its mDNS announcement is what it says
+    it *is*. Both are worth printing, so the second one goes in parentheses
+    beside the first - unless it is the only thing we have, in which case it is
+    the label, and "unknown" is left for devices that told us nothing at all.
+    """
+    main = hostname or vendor or services or "unknown"
+    return f"{main}  ({services})" if services and services != main else main
+
+
 def cmd_scan(args) -> int:
     ports = () if args.no_ports else tuple(args.ports)
     devices = discover(
@@ -40,6 +52,7 @@ def cmd_scan(args) -> int:
         ports=ports,
         lookup_vendor=oui.lookup,
         resolve_names=not args.no_resolve,
+        services={} if args.no_mdns else mdns.discover(),
     )
     conn = store.connect(args.db)
     # Read the prior scan before inserting this one, or the "previous" scan
@@ -72,7 +85,7 @@ def cmd_scan(args) -> int:
     else:
         print(f"scan {scan_id}: {len(devices)} device(s) on {args.subnet}")
         for device in devices:
-            label = device.hostname or device.vendor or "unknown"
+            label = device_label(device.hostname, device.vendor, device.services)
             open_ports = (
                 f"  ports {','.join(str(p) for p in device.ports)}"
                 if device.ports
@@ -165,6 +178,7 @@ def cmd_audit(args) -> int:
         ports=tuple(args.ports),
         lookup_vendor=oui.lookup,
         resolve_names=not args.no_resolve,
+        services={} if args.no_mdns else mdns.discover(),
     )
     banners = {
         (device.ip, port): grab_banner(device.ip, port)
@@ -235,7 +249,7 @@ def cmd_inventory(args) -> int:
         return 0
     print(f"{len(rows)} device(s) ever seen\n")
     for row in rows:
-        label = row["hostname"] or row["vendor"] or "unknown"
+        label = device_label(row["hostname"], row["vendor"], row["services"])
         print(f"{row['ip']:<15} {row['mac']}  {label}")
         print(
             f"    first {row['first_seen']}  last {row['last_seen']}  seen {row['times_seen']}x"
@@ -272,6 +286,9 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--ports", type=int, nargs="*", default=list(DEFAULT_PORTS))
     scan.add_argument("--no-ports", action="store_true", help="skip the port scan")
     scan.add_argument("--no-resolve", action="store_true", help="skip reverse DNS")
+    scan.add_argument(
+        "--no-mdns", action="store_true", help="skip asking devices what they are"
+    )
     scan.add_argument("--webhook", help="POST a JSON alert here when anything changed")
     scan.add_argument(
         "--fail-on-change",
@@ -292,6 +309,9 @@ def build_parser() -> argparse.ArgumentParser:
     aud.add_argument("subnet", nargs="?", help="CIDR to audit, e.g. 192.168.1.0/24")
     aud.add_argument("--ports", type=int, nargs="*", default=list(DEFAULT_PORTS))
     aud.add_argument("--no-resolve", action="store_true", help="skip reverse DNS")
+    aud.add_argument(
+        "--no-mdns", action="store_true", help="skip asking devices what they are"
+    )
     aud.add_argument(
         "--no-upnp", action="store_true", help="skip the router port-forward check"
     )

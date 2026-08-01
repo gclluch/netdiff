@@ -51,6 +51,7 @@ class Device:
     ip: str
     vendor: str = ""
     hostname: str = ""
+    services: str = ""
     ports: tuple[int, ...] = field(default=())
 
     def key(self) -> str:
@@ -169,8 +170,15 @@ def discover(
     lookup_vendor=None,
     settle: float = ARP_SETTLE_SECONDS,
     resolve_names: bool = True,
+    services=None,
 ) -> list[Device]:
-    """Scan `subnet` (CIDR) and return the devices found, sorted by IP."""
+    """Scan `subnet` (CIDR) and return the devices found, sorted by IP.
+
+    `services` is an optional IP -> description map from `mdns.discover()`,
+    collected by the caller. Passing it in rather than gathering it here keeps
+    this module to the one discovery technique it is about, and keeps the map a
+    plain dict that a test can hand over without a socket.
+    """
     network = ipaddress.ip_network(subnet, strict=False)
     hosts = [str(h) for h in network.hosts()]
     nudge(hosts)
@@ -189,6 +197,7 @@ def discover(
                 ip=ip,
                 vendor=lookup_vendor(mac) if lookup_vendor else "",
                 hostname=resolve_hostname(ip) if resolve_names else "",
+                services=(services or {}).get(ip, ""),
                 ports=scan_ports(ip, ports) if ports else (),
             )
         )

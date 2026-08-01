@@ -32,7 +32,15 @@ class Change:
         return SEVERITY.get(self.kind, 0)
 
     def __str__(self) -> str:
-        label = self.device.hostname or self.device.vendor or self.device.mac
+        # Display only. `services` is deliberately not compared anywhere in this
+        # module: one missed mDNS reply would otherwise report a change every
+        # other scan, and a change that is not real is worse than none.
+        label = (
+            self.device.hostname
+            or self.device.vendor
+            or self.device.services
+            or self.device.mac
+        )
         suffix = f" ({self.detail})" if self.detail else ""
         return f"[{self.kind}] {label} {self.device.ip} {self.device.mac}{suffix}"
 

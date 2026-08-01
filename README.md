@@ -9,8 +9,10 @@ Then `netdiff audit` asks the question those tools do not: **which of these is r
 ```console
 $ netdiff scan 192.168.1.0/24
 scan 7: 12 device(s) on 192.168.1.0/24
-  192.168.1.1     00:1d:c9:0a:1b:2c  router.local     ports 53,80,443
-  192.168.1.23    b8:27:eb:aa:bb:cc  Raspberry Pi     ports 22
+  192.168.1.1     00:1d:c9:0a:1b:2c  router.local  ports 53,80,443
+  192.168.1.23    b8:27:eb:aa:bb:cc  Raspberry Pi  (SSH, Web interface)  ports 22
+  192.168.1.64    54:60:09:11:22:33  Google  (Chromecast)
+  192.168.1.71    d8:3a:dd:aa:bb:cc  Mac15,7, AirPlay
   ...
 
 changes since last scan: 1 appeared, 1 port-opened
@@ -70,6 +72,8 @@ Findings are recorded alongside scans, so a repeat audit marks what is `[NEW]` s
 | `upnp-control-open` | medium | The router answered an unauthenticated control request - so would it for anything else on the LAN |
 | `open-ports-noted` | info | Explicitly **not** a problem. See below. |
 
+**And a vendor is not a device type.** "Espressif" covers a smart plug, a doorbell and someone's weekend project equally, so a MAC lookup alone leaves the most useful column nearly empty. Rather than guess a device type from its open ports - which is how the tool netdiff replaced arrived at "Managed Web Server" for a printer - netdiff asks the network the question every phone on it asks continuously, and reads the answer. Chromecasts, printers, Sonos, HomeKit gear and Apple devices all announce their services over multicast DNS, unprompted, to anyone on the segment. `Mac15,7` in the output is the device's own word for itself, not an inference. A device that announces nothing is left blank, because not knowing is the normal case.
+
 **A port number is not evidence of a protocol either.** Port 23 being open does not prove telnet is behind it. So for services that greet you unprompted - FTP, Telnet, VNC - netdiff will not name the protocol until it has heard the greeting. RTSP and MQTT say nothing until spoken to, so there the evidence line states plainly that the identification is by port assignment, and the `verify` command lets you settle it.
 
 **An open port is not a vulnerability.** It is what a working device looks like. Tools that list every open port under a heading like "vulnerabilities found" are counting furniture and calling it a fire, and they train you to ignore the report. netdiff counts open ports and says out loud that they are not findings. A port becomes interesting when the protocol behind it is unencrypted, when it is reachable from outside the network, or when the software behind it is known-broken - and those are the rules above.
@@ -106,6 +110,7 @@ Python 3.9+. Nothing else - `pip show netdiff` lists no dependencies, and CI ass
 ```bash
 netdiff scan 192.168.1.0/24              # scan, record, report changes
 netdiff scan 192.168.1.0/24 --no-ports   # discovery only, no TCP connections
+netdiff scan 192.168.1.0/24 --no-mdns    # skip asking devices what they are
 netdiff audit 192.168.1.0/24             # what this network exposes, and why it matters
 netdiff inventory                        # every device ever seen, first and last sighting
 netdiff history                          # diff the two most recent scans
@@ -154,7 +159,7 @@ History lives in `~/.netdiff/history.db` (override with `--db`). It is a plain S
 
 ## Scope
 
-Only scan networks you are responsible for. netdiff is deliberately read-only - it sends empty UDP datagrams, completes TCP handshakes, reads banners services volunteer, and asks the router to list its own port forwards. It never writes to a host, never authenticates, and never changes router configuration. Even so, scanning equipment you do not own is your problem, not the tool's.
+Only scan networks you are responsible for. netdiff is deliberately read-only - it sends empty UDP datagrams, completes TCP handshakes, reads banners services volunteer, asks the standard DNS-SD question over multicast and reads the replies, and asks the router to list its own port forwards. It never writes to a host, never authenticates, and never changes router configuration. Even so, scanning equipment you do not own is your problem, not the tool's.
 
 ## Development
 
@@ -162,7 +167,9 @@ Only scan networks you are responsible for. netdiff is deliberately read-only - 
 pip install pytest && pytest -q
 ```
 
-The tests never touch the network. ARP parsing runs against captured `arp -an` and `ip neigh` output, UPnP parsing against captured router XML, and the one end-to-end test stands up a throwaway HTTP server on loopback. The database is a temp file.
+The tests never touch the network. ARP parsing runs against captured `arp -an` and `ip neigh` output, UPnP parsing against captured router XML, mDNS parsing against hand-built packets, and the one end-to-end test stands up a throwaway HTTP server on loopback. The database is a temp file.
+
+`test_mdns.py` builds its packets with its own helpers rather than with the encoder in `mdns.py`, because a decoder tested only against its own encoder agrees with itself however wrong both are. Half of that file is malformed input - a name pointing at itself, a record claiming to be longer than the packet carrying it - because anything able to send a UDP datagram can send those.
 
 `test_diff.py` covers change detection. `test_audit.py` covers the rules, and roughly half of it asserts that something is *not* reported - an open port, an HTTP 200, a missing security header, a connection error. Those are the important half: the failure mode for a tool like this is not missing a finding, it is inventing one.
 

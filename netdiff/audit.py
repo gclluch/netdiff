@@ -283,7 +283,7 @@ def rule_mapping(mapping, devices):
         )
 
     if mapping.internal_port in device.ports:
-        label = device.hostname or device.vendor or device.ip
+        label = device.hostname or device.vendor or device.services or device.ip
         return finding(
             "internet-exposed-service",
             device.ip,
