@@ -26,6 +26,17 @@ from dataclasses import dataclass, field
 NUDGE_PORT = 9
 ARP_SETTLE_SECONDS = 1.0
 
+# ARP does not cross routers, so a subnet larger than this is not a broadcast
+# segment - it is a typo, or someone pointing the tool at 10.0.0.0/8 to see what
+# happens. That is 16.7M addresses materialised as strings before a single
+# packet moves, so refuse it up front rather than swapping to death.
+MAX_HOSTS = 65536
+
+# Concurrency for per-device work. Each worker is blocked on a socket timeout,
+# not on the CPU, so the useful number is set by how long we are willing to wait
+# rather than by core count.
+SCAN_WORKERS = 32
+
 # `arp -an` on macOS/BSD/Linux: "? (192.168.1.1) at ab:cd:ef:12:34:56 on en0"
 _ARP_LINE = re.compile(
     r"\((?P<ip>\d+\.\d+\.\d+\.\d+)\)\s+at\s+(?P<mac>[0-9a-fA-F:]{11,17})"
@@ -133,6 +144,21 @@ def scan_ports(ip: str, ports, timeout: float = 0.3) -> tuple[int, ...]:
     return tuple(sorted(open_ports))
 
 
+def grab_banners(pairs, timeout: float = 2.0) -> dict:
+    """Banner for each (ip, port), gathered concurrently.
+
+    Sequentially this is the slowest thing the audit does: every port that is
+    open but silent - a TLS port never greets - costs the full timeout, one
+    after another.
+    """
+    pairs = list(pairs)
+    if not pairs:
+        return {}
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+        banners = pool.map(lambda pair: grab_banner(*pair, timeout=timeout), pairs)
+        return dict(zip(pairs, banners))
+
+
 def grab_banner(ip: str, port: int, timeout: float = 2.0) -> str:
     """Read what a service volunteers about itself.
 
@@ -180,6 +206,11 @@ def discover(
     plain dict that a test can hand over without a socket.
     """
     network = ipaddress.ip_network(subnet, strict=False)
+    if network.num_addresses > MAX_HOSTS:
+        raise ValueError(
+            f"{subnet} holds {network.num_addresses} addresses; "
+            f"netdiff scans one broadcast segment, up to {MAX_HOSTS}"
+        )
     hosts = [str(h) for h in network.hosts()]
     nudge(hosts)
     time.sleep(settle)
@@ -189,16 +220,20 @@ def discover(
         ip: mac for ip, mac in table.items() if ipaddress.ip_address(ip) in network
     }
 
-    devices = []
-    for ip, mac in in_subnet.items():
-        devices.append(
-            Device(
-                mac=mac,
-                ip=ip,
-                vendor=lookup_vendor(mac) if lookup_vendor else "",
-                hostname=resolve_hostname(ip) if resolve_names else "",
-                services=(services or {}).get(ip, ""),
-                ports=scan_ports(ip, ports) if ports else (),
-            )
+    def observe(item):
+        ip, mac = item
+        return Device(
+            mac=mac,
+            ip=ip,
+            vendor=lookup_vendor(mac) if lookup_vendor else "",
+            hostname=resolve_hostname(ip) if resolve_names else "",
+            services=(services or {}).get(ip, ""),
+            ports=scan_ports(ip, ports) if ports else (),
         )
+
+    # Reverse DNS and the port scan are both waits, not work, and neither depends
+    # on any other device. Sequentially the scan took the sum of every timeout on
+    # the network; concurrently it takes the worst single device.
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+        devices = list(pool.map(observe, in_subnet.items()))
     return sorted(devices, key=lambda d: ipaddress.ip_address(d.ip))
