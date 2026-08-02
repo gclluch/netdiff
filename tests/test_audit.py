@@ -421,7 +421,15 @@ def everything():
 
 
 def test_every_rule_id_used_by_a_rule_exists_in_the_teaching_table():
-    assert {f.rule for f in everything()} == set(RULES)
+    """Both directions: no rule fires without teaching text, none is orphaned.
+
+    `RULES` is one table for two commands. The `here-` half belongs to `netdiff
+    here`, which `audit()` never fires, and `test_here.py` holds the same
+    assertion for those.
+    """
+    assert {f.rule for f in everything()} == {
+        rule for rule in RULES if not rule.startswith("here-")
+    }
 
 
 def test_dangling_verify_pings_a_bare_address_not_an_ip_colon_port():

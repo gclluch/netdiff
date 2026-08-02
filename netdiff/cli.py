@@ -1,4 +1,4 @@
-"""Command line interface: scan, audit, glossary, inventory, history."""
+"""Command line interface: scan, audit, here, glossary, inventory, history."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import audit as audit_rules
-from . import glossary, mdns, oui, probe, report, store, upnp
+from . import glossary, here, mdns, oui, probe, report, store, upnp
 from .diff import diff, summarise
 from .scan import (
     DEFAULT_PORTS,
@@ -57,11 +57,18 @@ def resolve_subnet(args) -> None:
 
     Announcing it is not decoration: a scan whose target was inferred has to
     show its target, or the report is about a network the reader never chose.
+
+    On stderr, because every command that calls this also has a `--json` mode
+    and a notice on stdout lands inside the document - `netdiff scan --json`
+    with no subnet emitted something no parser would accept.
     """
     if args.subnet:
         return
     args.subnet = local_subnet()
-    print(f"no subnet given - scanning {args.subnet}, the network this machine is on")
+    print(
+        f"no subnet given - scanning {args.subnet}, the network this machine is on",
+        file=sys.stderr,
+    )
 
 
 def cmd_scan(args) -> int:
@@ -311,6 +318,49 @@ def cmd_glossary(args) -> int:
     return 0
 
 
+def cmd_here(args) -> int:
+    """What this network does to you, for a network you did not choose."""
+    resolve_subnet(args)
+    observed = here.observe(args.subnet, ports=resolve_ports(args.ports))
+    findings = audit_rules.here_findings(observed, here.is_private)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "subnet": args.subnet,
+                    "gateway": observed["gateway"],
+                    "resolvers": list(observed["resolvers"]),
+                    "summary": audit_rules.summarise(findings),
+                    "findings": [f.__dict__ for f in findings],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print(f"here: {args.subnet} - {audit_rules.summarise(findings)}")
+    print(
+        f"gateway {observed['gateway'] or 'none'}, "
+        f"resolver(s) {', '.join(observed['resolvers']) or 'none'}\n"
+    )
+    severity = ""
+    for finding in findings:
+        if not args.verbose:
+            print_headline(finding)
+            continue
+        if finding.severity != severity:
+            severity = finding.severity
+            print(severity.upper())
+        print_lesson(finding)
+
+    if not args.verbose:
+        print()
+        print("-v adds the evidence each line rests on, why it matters, what to do")
+        print("about it, and a command you can run yourself to confirm it.")
+    return 0
+
+
 def cmd_inventory(args) -> int:
     conn = store.connect(args.db)
     rows = store.inventory(conn)
@@ -441,6 +491,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gloss.add_argument("term", nargs="?", help="a term to explain, e.g. upnp")
     gloss.set_defaults(func=cmd_glossary)
+
+    her = sub.add_parser(
+        "here",
+        help="what this network does to you, for one you did not choose",
+        description=(
+            "The inverse of `audit`. Not what is on this network - those are not "
+            "your devices - but what it does to you: whether it reads your "
+            "encrypted traffic, whether its DNS tells the truth, whether its ARP "
+            "adds up, and which of your own ports answer from here. Records "
+            "nothing: a network you are passing through does not belong in your "
+            "history."
+        ),
+    )
+    her.add_argument(
+        "subnet",
+        nargs="?",
+        help="CIDR of the network you are on - defaults to working it out",
+    )
+    her.add_argument(
+        "--ports",
+        nargs="*",
+        default=list(DEFAULT_PORTS),
+        metavar="PORT|SET",
+        help=f"which of your own ports to check ({', '.join(sorted(PORT_SETS))})",
+    )
+    her.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="expand every finding into its evidence, why, fix and verify",
+    )
+    her.add_argument("--json", action="store_true")
+    her.set_defaults(func=cmd_here)
 
     inv = sub.add_parser("inventory", help="every device ever seen")
     inv.add_argument("--json", action="store_true")

@@ -4,7 +4,7 @@ Track what is on your network, what it exposes to the internet, and when that ch
 
 `nmap` and Fing answer "what is on my network *right now*". Neither remembers. netdiff records every scan, diffs it against the last one, and tells you what actually changed - a device that appeared at 3am, a printer that quietly opened port 8080, a laptop that moved to a new DHCP lease.
 
-Then `netdiff audit` asks the question those tools do not: **which of these is reachable from outside your house, and why does that matter?**
+Then `netdiff audit` asks the question those tools do not: **which of these is reachable from outside your house, and why does that matter?** And `netdiff here` inverts it for wifi you did not choose: **what does this network do to me?**
 
 ```console
 $ netdiff scan 192.168.1.0/24
@@ -151,6 +151,39 @@ One trust boundary is worth naming: SSDP replies are unauthenticated UDP, so any
 
 That check holds for every hop, not just the first. A device description can name an absolute `controlURL` that discards the URL we vetted, and any response can redirect, so the control URL is re-checked against the same subnet and redirects are refused outright. The same reasoning covers what gets *printed*: a `verify` line is a command you are told to run, so every value from the network that reaches one - the control URL, a forward's internal client - is validated where it enters, not escaped where it is rendered.
 
+## `netdiff here`: what the network does to *you*
+
+Every command above asks *what is on this network*. Sitting in a cafe that is the wrong question, and an impolite one - those are not your devices, and the [Scope](#scope) section rules out scanning them. So `netdiff here` inverts it: **not what is on this network, but what does this network do to me.**
+
+```console
+$ netdiff here
+here: 10.24.8.0/22 - 1 high, 3 medium, 2 info
+gateway 10.24.8.1, resolver(s) 10.24.8.1
+
+    high      this network is reading your encrypted traffic to example.com
+    medium    this network intercepts web traffic - example.com answered 302
+    medium    this network's resolver invents answers for names that do not exist
+    medium    2 service(s) on this machine are bound to the network, not loopback
+    info      31 other device(s) on this network are reachable from here
+```
+
+Nothing it does is about anyone else here. It asks whether your TLS survives the trip, whether the resolver you were handed tells the truth, whether the ARP table adds up, and which of *your own* ports answer from where you are sitting.
+
+| Rule | Severity | Fires when |
+| --- | --- | --- |
+| `here-tls-intercepted` | high | A verified TLS handshake to a public site fails certificate validation - something is terminating your connections and opening new ones onward |
+| `here-captive-portal` | medium | A site that never redirects answered with a redirect, so something else answered for it |
+| `here-dns-invented` | medium | The resolver returned an address for a name under `.invalid`, which is reserved so that it can never exist |
+| `here-dns-redirected` | medium | The resolver answered a public name with a private address. No content network does this |
+| `here-arp-claims` | medium | One MAC answers for three or more addresses. Dull explanations exist and the lesson names them |
+| `here-own-ports-exposed` | medium | Services on this machine answered on its network address, so they are bound to the network rather than only to loopback |
+| `here-client-isolation-off` | info | Explicitly **not** a problem. Other devices are reachable - which cuts both ways |
+| `here-client-isolation-on` | info | The good result, printed as such: only the gateway answered |
+
+**It records nothing.** A cafe network written into `~/.netdiff/history.db` would put strangers' MAC addresses in your `inventory` and make the next scan at home report a wall of `appeared`/`vanished`. `here` is a snapshot of somewhere you are passing through, not a network you track.
+
+**Two things it deliberately does not claim.** It does not compare the local resolver's answers against a public one: content networks legitimately return different addresses to different resolvers, so a difference is not evidence. The two DNS rules above need no comparison to be certain. And it cannot see an interceptor whose certificate authority your machine already trusts - a corporate laptop with a policy CA installed produces a clean handshake, and nothing observable distinguishes that from an honest network.
+
 ## Why no dependencies, and why no root
 
 Most LAN scanners either shell out to `nmap` or send raw ARP frames with `scapy`, and raw frames need root. netdiff does neither.
@@ -177,6 +210,8 @@ netdiff scan 192.168.1.0/24 --no-ports   # discovery only, no TCP connections
 netdiff scan 192.168.1.0/24 --no-mdns    # skip asking devices what they are
 netdiff audit 192.168.1.0/24             # what this network exposes, and why it matters
 netdiff audit --ports top100 3000 5432   # a set, plus whatever else you run
+netdiff here                             # what this network does to you - for wifi you did not choose
+netdiff here -v                          # each finding expanded into its lesson
 netdiff inventory                        # every device ever seen, first and last sighting
 netdiff history                          # diff the two most recent scans
 netdiff glossary                         # every word the output uses, one line each
@@ -220,6 +255,8 @@ History lives in `~/.netdiff/history.db` (override with `--db`). It is a plain S
 - **`--ports top100` is 100 ports, not 65535.** It is nmap's frequency ranking, which is a good answer to "what is worth a timeout" and a bad answer to "what is definitely closed". A service on an unusual port is invisible to both the default set and this one.
 - **No UPnP gateway means no UPnP findings, not a clean bill of health.** A router with UPnP disabled is a good result, and it is also the common case now. Port forwards you configured by hand do not appear in the UPnP table at all - check your router's admin page for those.
 - **The audit sees the LAN's exposure, not the internet's view of it.** It reads the forwarding table the router admits to. The only way to know what is actually reachable is to test from outside, which is why every exposure finding hands you that command.
+- **`netdiff here` cannot see a trusted interceptor.** If a certificate authority has been installed on this machine - which is how corporate traffic inspection works, with consent - the handshake verifies and there is nothing to report. Nothing observable distinguishes that from an honest network, so it is stated here rather than papered over with a guess.
+- **A quiet network looks like an isolated one.** `here-client-isolation-on` says only the gateway answered ARP, which is the observation. Client isolation produces it, and so does being the only guest in the building. The finding is worded as what was seen for that reason.
 - **The bundled vendor table is small.** It covers common home-network hardware. For full coverage, download the IEEE registry and point `NETDIFF_OUI` at the CSV:
   ```bash
   curl -o oui.csv https://standards-oui.ieee.org/oui/oui.csv
@@ -229,6 +266,8 @@ History lives in `~/.netdiff/history.db` (override with `--db`). It is a plain S
 ## Scope
 
 Only scan networks you are responsible for. netdiff is deliberately read-only. In full, what it sends: empty UDP datagrams to provoke ARP, one ICMP echo per device, TCP handshakes, `HEAD /` to HTTP ports, a TLS ClientHello, an SMB negotiate offering one dialect, an SSH version string, a DNS query for `example.com`, the standard DNS-SD question over multicast, and one UPnP request asking the router to list its own port forwards. It never writes to a host, never authenticates, and never changes router configuration. Even so, scanning equipment you do not own is your problem, not the tool's.
+
+`netdiff here` exists because of that last sentence. On a network you did not choose, it adds one DNS query for a name under `.invalid`, one for `example.com`, one HTTP `GET` and one verified TLS handshake to `example.com`, and TCP handshakes to your own address. It sends nothing at all to any other device on the network beyond the same empty datagrams that provoke ARP - every question it asks is about the infrastructure you were handed, or about this machine.
 
 ## Development
 
@@ -241,6 +280,8 @@ The tests never touch the network. ARP parsing runs against captured `arp -an` a
 `test_probe.py` covers the protocol parsers. Its two SMB fixtures are real replies captured from Samba - one configured to allow SMBv1 and one to refuse it - because the refusal is the shape that matters: a parser that only handles the happy path reports every modern server as running SMBv1. The certificate is a throwaway generated by `openssl`, and the parser has to arrive at the same dates `openssl x509 -noout -dates` prints for it.
 
 `test_mdns.py` builds its packets with its own helpers rather than with the encoder in `mdns.py`, because a decoder tested only against its own encoder agrees with itself however wrong both are. Half of that file is malformed input - a name pointing at itself, a record claiming to be longer than the packet carrying it - because anything able to send a UDP datagram can send those.
+
+`test_here.py` never touches a network either, which matters more there than anywhere: the interesting cases are all hostile networks - a resolver inventing answers, a box terminating your TLS, a MAC answering for addresses it does not own - and none of them can be arranged on a desk. So the DNS parsing runs against packets the test assembles itself, and every rule is a pure function over what `observe()` gathered. Half of that file asserts something is *not* reported, for a sharper reason than elsewhere: `here` hands its reader a verdict on whether to trust the place they are sitting, and a confident accusation against a network that was fine is worse than a missed finding.
 
 `test_diff.py` covers change detection. `test_audit.py` covers the rules, and roughly half of it asserts that something is *not* reported - an open port, an HTTP 200, a missing security header, a connection error. Those are the important half: the failure mode for a tool like this is not missing a finding, it is inventing one.
 

@@ -23,6 +23,7 @@ gap, and internet-reachable is attack surface.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -393,6 +394,234 @@ RULES = {
         ),
         "verify": "curl -sI http://{device}:{port}/ | grep -i server",
     },
+    # --- `netdiff here`: what the network does to you, not what is on it -----
+    #
+    # These fire against infrastructure you were handed rather than devices you
+    # own, so the bar for each is the same and it is high: an observation that
+    # has no innocent explanation. "Different from what I expected" is not one.
+    "here-tls-intercepted": {
+        "severity": "high",
+        "title": "this network is reading your encrypted traffic to {host}",
+        "why": (
+            "We opened an ordinary HTTPS connection to {host} - a public site with "
+            "a certificate from a public authority - and the certificate that came "
+            "back does not verify. A network that is merely passing traffic along "
+            "cannot cause that: the certificate is signed by an authority your "
+            "machine already trusts, and nothing in between has the key needed to "
+            "produce another one. The likely reading is that something here is "
+            "terminating your encrypted connections, reading them, and opening new "
+            "ones onward - so everything you send over this network should be "
+            "treated as read by a stranger, including passwords and anything "
+            "already logged in on this machine.\n\n"
+            "Two things on this computer produce the same failure, and both are "
+            "worth ruling out first because neither is about the network: a clock "
+            "set wrongly enough to put today outside the certificate's dates, and "
+            "a trust store that is empty or unreadable. The evidence line quotes "
+            "the reason given - anything mentioning expiry points at the clock."
+        ),
+        "fix": (
+            "Stop using this network for anything that matters, now rather than "
+            "after you have finished. Do not click through the browser warning - it "
+            "is the only thing standing between you and the interception, and this "
+            "is the case it was built for. If you must use the network, use a VPN, "
+            "which encrypts everything before it touches the local network at all. "
+            "On a corporate network this may be a deliberate policy with a "
+            "certificate installed on your machine, in which case you would not be "
+            "seeing this finding - so it is not that. Check this machine's clock "
+            "first, though: it is free, and it explains an expiry failure without "
+            "any of the above being true."
+        ),
+        "verify": (
+            "openssl s_client -connect {host}:443 </dev/null 2>/dev/null"
+            " | openssl x509 -noout -issuer\n"
+            "The issuer is whoever signed it. On a clean connection that is a\n"
+            "public certificate authority; here it is whatever is intercepting."
+        ),
+    },
+    "here-captive-portal": {
+        "severity": "medium",
+        "title": "this network intercepts web traffic - {host} answered {status}",
+        "why": (
+            "We asked {host} for its front page and something else replied. That "
+            "site does not redirect anyone, so the answer did not come from it. "
+            "This is the ordinary machinery of a captive portal - the hotel or "
+            "cafe page that wants a room number - and by itself it is unremarkable. "
+            "What is worth knowing is that the machinery is capable of rewriting "
+            "any unencrypted request, that it does not always switch off after you "
+            "have logged in, and that anything on this network sending data over "
+            "plain HTTP is passing it through whoever runs that box."
+        ),
+        "fix": (
+            "Log in through the portal if that is what this is, then run `netdiff "
+            "here` again - a portal that is still intercepting afterwards is doing "
+            "something other than asking you to agree to terms. Either way, treat "
+            "unencrypted traffic on this network as public, and prefer a VPN for "
+            "anything you would not post."
+        ),
+        "verify": (
+            "curl -sI http://{host}/\n"
+            "A clean network answers 200 from the site itself. A portal answers\n"
+            "a redirect to itself, and the Location header names where."
+        ),
+        # ponytail: this rests on example.com never issuing a redirect, which is
+        # IANA's decision and not a property of the protocol. It has held for
+        # decades. The day it stops, this fires on every network at once - which
+        # is loud enough that nobody will be quietly misled.
+    },
+    "here-dns-invented": {
+        "severity": "medium",
+        "title": "this network's resolver invents answers for names that do not exist",
+        "why": (
+            "We asked {resolver} for a name under `.invalid`, which is reserved so "
+            "that it can never be registered by anyone, and it returned an address. "
+            "There is no lookup that could have produced that answer - it was made "
+            "up. Usually this is an ISP or a hotspot pointing typos at a search or "
+            "advertising page, which means every mistyped name you enter is logged "
+            "somewhere with your address beside it. It also breaks the signal "
+            "software relies on to know a name is wrong, so a program that should "
+            "fail fast instead connects to whoever is answering."
+        ),
+        "fix": (
+            "Set a resolver of your own rather than accepting the one this network "
+            "handed you - 1.1.1.1 or 9.9.9.9 both refuse to do this. On a network "
+            "you control, look for a 'DNS assist', 'search redirect' or 'web guide' "
+            "setting at your ISP and turn it off. Note that a network can also "
+            "intercept port 53 outright, so confirm the change took effect rather "
+            "than assuming it."
+        ),
+        "verify": (
+            "dig @{resolver} {name} +short\n"
+            "Any address at all is a fabricated answer. The correct reply is\n"
+            "NXDOMAIN, which prints nothing."
+        ),
+    },
+    "here-dns-redirected": {
+        "severity": "medium",
+        "title": "this network's resolver points {name} at an address inside the network",
+        "why": (
+            "{resolver} answered a query for {name} with {address}, which is a "
+            "private address - one that only exists inside this network. The real "
+            "site is not there. Whatever is at that address is intercepting "
+            "connections meant for somewhere else, which is how a captive portal "
+            "works and also how credentials are collected. This one is not "
+            "ambiguous: no legitimate content network answers a public name with a "
+            "private address, so there is no innocent explanation to weigh."
+        ),
+        "fix": (
+            "If you have not yet passed this network's login page, this is probably "
+            "that and it will stop once you have. If you have, the network is "
+            "steering your traffic somewhere of its choosing: stop using it for "
+            "anything that matters, and use a VPN if you must stay on it."
+        ),
+        "verify": (
+            "dig @{resolver} {name} +short\n"
+            "Compare against a resolver this network did not choose:\n"
+            "dig @1.1.1.1 {name} +short"
+        ),
+    },
+    "here-arp-claims": {
+        "severity": "medium",
+        "title": "one device answers for {count} addresses on this network",
+        "why": (
+            "The MAC address {mac} holds {count} different addresses in this "
+            "machine's ARP table. ARP has no authentication - any device can answer "
+            "for any address - so one device claiming many is the signature of "
+            "something answering for addresses it does not own, which is how "
+            "traffic between two other machines gets routed through a third. "
+            "There are dull explanations too, and on most networks it is one of "
+            "them: a router with several addresses, a bridge, a hypervisor hosting "
+            "virtual machines. Which it is depends on where you are - on your own "
+            "network you can probably name the device; on a cafe network you "
+            "cannot, and that is the point."
+        ),
+        "fix": (
+            "On a network you control, identify the device and satisfy yourself it "
+            "is a router or a hypervisor. On one you do not, assume traffic here is "
+            "observable: use a VPN, and check that sites you care about show a "
+            "valid certificate rather than clicking through a warning."
+        ),
+        "verify": "arp -an | grep -i {mac}\nEach line is an address it claims.",
+    },
+    "here-client-isolation-off": {
+        "severity": "info",
+        "title": "{count} other device(s) on this network are reachable from here",
+        "why": (
+            "Not a problem by itself, and the normal case for a home network - it "
+            "is what lets your laptop print. Worth knowing on a network you do not "
+            "own, because it works in both directions: those devices are reachable "
+            "from your machine, and your machine is reachable from them. Public "
+            "wifi with client isolation switched on would show none of them. This "
+            "network has it off, so any of the findings about your own open ports "
+            "in this report are reachable by whoever else is here."
+        ),
+        "fix": (
+            "Nothing, on your own network. On someone else's, make sure your "
+            "machine's firewall is on and file sharing is off before you settle in "
+            "- most operating systems have a 'public network' setting that does "
+            "both, and it is worth checking it actually got applied when you joined."
+        ),
+        "verify": (
+            "arp -an\n"
+            "Every line with a hardware address beside it is a device that\n"
+            "answered from this network."
+        ),
+    },
+    "here-client-isolation-on": {
+        "severity": "info",
+        "title": "nothing but the gateway answered - this network may isolate its clients",
+        "why": (
+            "Only the router appeared. On public wifi that usually means client "
+            "isolation is switched on, which is the setting you want: devices can "
+            "reach the internet and not each other, so nobody here can reach your "
+            "machine. Stated as the observation rather than the conclusion, because "
+            "a quiet network looks the same as an isolated one - devices that have "
+            "not been spoken to may simply not be in the table yet, and a network "
+            "where you are genuinely the only guest looks identical."
+        ),
+        "fix": (
+            "Nothing. This is the good result. It does not make the network "
+            "trustworthy - isolation stops other guests reaching you, and does "
+            "nothing about whoever runs the network itself."
+        ),
+        "verify": (
+            "arp -an\n"
+            "Only the gateway has a hardware address beside it, or the table is\n"
+            "empty."
+        ),
+    },
+    "here-own-ports-exposed": {
+        "severity": "medium",
+        "title": "{count} service(s) on this machine are bound to the network, not loopback",
+        "why": (
+            "These are your ports, not somebody else's. A service bound only to "
+            "127.0.0.1 cannot be reached from the network at all; these answered on "
+            "{address}, this machine's address on this network, so they are offered "
+            "to it. On your own network that is usually deliberate - it is how file "
+            "sharing and remote login work. On a network you do not own it is a "
+            "door left open in a room you do not know, and if this report also says "
+            "client isolation is off then other people here can knock on it.\n\n"
+            "What this does not prove is that a connection from another machine "
+            "would succeed. The check runs from this computer to its own address, "
+            "and an operating system may answer that without the packet reaching "
+            "the network - so a host firewall that would refuse the same connection "
+            "from elsewhere is never consulted. The `verify` command runs it from "
+            "somewhere that settles it."
+        ),
+        "fix": (
+            "Turn on your firewall and switch off sharing before joining a network "
+            "you do not control - macOS has this under Network then Firewall, "
+            "Windows asks whether a network is public and means it, and Linux has "
+            "ufw. Where a service only needs to be reachable from this machine, "
+            "bind it to 127.0.0.1 rather than to every interface."
+        ),
+        "verify": (
+            "nc -vz {address} {port}      # from another device on this network\n"
+            "Run it from somewhere else, not from this machine. An operating\n"
+            "system may answer a connection to its own address without the packet\n"
+            "ever reaching the network, and a firewall that would have refused it\n"
+            "from elsewhere never gets consulted."
+        ),
+    },
     "open-ports-noted": {
         "severity": "info",
         "title": "{count} open port(s) observed, and not reported as problems",
@@ -626,6 +855,192 @@ def rule_dns_recursion(ip: str, evidence: str):
     if not evidence:
         return None
     return finding("dns-recursion-open", ip, evidence)
+
+
+# --- `netdiff here` ---------------------------------------------------------
+#
+# Same contract as every rule above: plain data in, a Finding or None out, no
+# sockets. `here.observe()` does the talking. These read its dict.
+
+
+def rule_tls_intercepted(host: str, reason):
+    """A public certificate that does not verify. Nothing benign does this."""
+    if not reason:
+        # '' is a clean handshake, None is a network we could not reach at all.
+        # Neither is interception, and only one of them is even about TLS.
+        return None
+    return finding(
+        "here-tls-intercepted",
+        "network",
+        f"the certificate for {host} failed verification: {reason}",
+        host=host,
+    )
+
+
+def rule_captive_portal(host: str, response):
+    """Somebody other than the host answered for it."""
+    if response is None:
+        return None
+    status, location = response
+    if not (300 <= status < 400 or status == 511):
+        return None
+    where = f", pointing at {location}" if location else ""
+    return finding(
+        "here-captive-portal",
+        "network",
+        f"GET http://{host}/ answered HTTP {status}{where}",
+        host=host,
+        status=status,
+    )
+
+
+def rule_dns_invented(resolver: str, name: str, answer):
+    """An address for a name that is reserved so it can never exist."""
+    if answer is None:
+        return None
+    rcode, addresses = answer
+    if rcode != 0 or not addresses:
+        return None
+    return finding(
+        "here-dns-invented",
+        resolver,
+        f"{resolver} answered {name} with {', '.join(addresses)}; "
+        f"the only correct reply is NXDOMAIN",
+        resolver=resolver,
+        name=name,
+    )
+
+
+def rule_dns_redirected(resolver: str, name: str, answer, private):
+    """A public name answered with an address that only exists in here.
+
+    `private` is passed in rather than imported so this stays a pure function
+    over its arguments - the caller owns the one line of address arithmetic.
+    """
+    if answer is None:
+        return None
+    _rcode, addresses = answer
+    inside = [address for address in addresses if private(address)]
+    if not inside:
+        return None
+    return finding(
+        "here-dns-redirected",
+        resolver,
+        f"{resolver} answered {name} with {', '.join(inside)}",
+        resolver=resolver,
+        name=name,
+        address=", ".join(inside),
+    )
+
+
+def rule_arp_claims(neighbours, threshold: int):
+    """One MAC holding several addresses, which ARP allows and nothing prevents."""
+    by_mac: dict = {}
+    for ip, mac in neighbours.items():
+        by_mac.setdefault(mac, []).append(ip)
+    findings = []
+    for mac, addresses in sorted(by_mac.items()):
+        if len(addresses) < threshold:
+            continue
+        listed = ", ".join(sorted(addresses, key=ipaddress.ip_address))
+        findings.append(
+            finding(
+                "here-arp-claims",
+                mac,
+                f"{mac} answers for {listed}",
+                mac=mac,
+                count=len(addresses),
+            )
+        )
+    return findings
+
+
+def rule_client_isolation(others, gateway: str):
+    """Whether anything but the router answered, reported either way.
+
+    The good result is worth printing. A report that only speaks up about
+    problems leaves you unable to tell "this network isolates its clients" from
+    "the check did not run", and on a network you are deciding whether to trust
+    those are opposite answers.
+
+    `gateway` is passed as '' unless the gateway itself answered ARP. Without
+    that, an empty table produced "only the gateway answered" - evidence for
+    something nobody observed - and there are two ordinary ways to get there: a
+    machine where neither `arp -an` nor `ip neigh` parsed, and a VPN, where the
+    default route is a tunnel peer that was never on this segment at all. Both
+    would have been handed the reader as "Nothing. This is the good result."
+    """
+    if not gateway:
+        # A sweep that did not even find the router proves nothing about
+        # isolation. Say nothing rather than call the network safe.
+        return None
+    if others:
+        # Sorted numerically, not as text: .102 before .23 reads as a bug, and
+        # this list is meant to be checked line-by-line against `arp -an`.
+        listed = ", ".join(sorted(others, key=ipaddress.ip_address))
+        return finding(
+            "here-client-isolation-off",
+            "network",
+            f"{len(others)} device(s) answered ARP besides the gateway: {listed}",
+            count=len(others),
+        )
+    return finding(
+        "here-client-isolation-on",
+        "network",
+        f"only the gateway {gateway} answered ARP on this segment",
+    )
+
+
+def rule_own_ports_exposed(address: str, ports):
+    """Ports of ours bound to the network rather than to loopback."""
+    if not ports:
+        return None
+    return finding(
+        "here-own-ports-exposed",
+        "network",
+        f"{address} accepted connections on {', '.join(str(p) for p in ports)}",
+        address=address,
+        count=len(ports),
+        # One real port rather than a `PORT` placeholder: the verify line is
+        # meant to be pasted, and a command you have to edit first is one people
+        # do not run.
+        port=ports[0],
+    )
+
+
+def here_findings(observed, private) -> list[Finding]:
+    """Every `here` rule against one `here.observe()` dict.
+
+    Keys are read directly rather than with defaults: `observe()` returns all of
+    them every time, including the names it asked about and the threshold it
+    used, so a missing one is a bug and should say so rather than quietly
+    rendering a finding about the empty string.
+
+    `private` is the address test, passed in for the same reason the rules take
+    it - this module decides what things mean and owns no arithmetic about what
+    an address is.
+    """
+    neighbours = observed["neighbours"] or {}
+    gateway, us = observed["gateway"], observed["us"]
+    host, invalid = observed["host"], observed["invalid_name"]
+    others = {ip for ip in neighbours if ip not in (gateway, us)}
+
+    findings = [
+        rule_tls_intercepted(host, observed["tls"]),
+        rule_captive_portal(host, observed["http"]),
+        # The gateway is only a gateway for this purpose if it answered here.
+        rule_client_isolation(others, gateway if gateway in neighbours else ""),
+        rule_own_ports_exposed(us, observed["own_ports"]),
+    ]
+    for resolver, answer in observed["nxdomain"].items():
+        findings.append(rule_dns_invented(resolver, invalid, answer))
+    for resolver, answer in observed["public_name"].items():
+        findings.append(rule_dns_redirected(resolver, host, answer, private))
+    findings.extend(rule_arp_claims(neighbours, observed["arp_threshold"]))
+
+    return sorted(
+        (f for f in findings if f), key=lambda f: (SEVERITY_ORDER[f.severity], f.device)
+    )
 
 
 def audit(
