@@ -37,6 +37,11 @@ MAX_HOSTS = 65536
 # rather than by core count.
 SCAN_WORKERS = 32
 
+# The port scan is flat - every (ip, port) at once rather than a pool of devices
+# each walking its own list - so `--ports top100` costs one timeout rather than
+# a hundred of them per device. Same reasoning as SCAN_WORKERS, more of it.
+PORT_WORKERS = 256
+
 # `arp -an` on macOS/BSD/Linux: "? (192.168.1.1) at ab:cd:ef:12:34:56 on en0"
 _ARP_LINE = re.compile(
     r"\((?P<ip>\d+\.\d+\.\d+\.\d+)\)\s+at\s+(?P<mac>[0-9a-fA-F:]{11,17})"
@@ -53,6 +58,61 @@ INCOMPLETE = {"incomplete", "(incomplete)"}
 # cleartext rather than TLS.
 HTTP_PORTS = (80, 81, 591, 5000, 8000, 8008, 8080, 8081, 8888)
 
+# The ports worth checking when you only want to know a device is alive and
+# roughly what it is. Deliberately small: this is the default because most runs
+# are a change check, not an inventory, and every port added here reports itself
+# as `port-opened` on everyone's next scan.
+DEFAULT_PORTS = (22, 80, 443, 445, 554, 1883, 3389, 5000, 8080, 8443)
+
+# nmap's top 100 TCP ports, in numeric order. Not a guess - it is the published
+# frequency ranking from internet-wide scanning, which is exactly the question
+# "which ports are worth the timeout" already answered by someone with data.
+# fmt: off
+TOP_100_PORTS = (
+    7, 9, 13, 21, 22, 23, 25, 26, 37, 53, 79, 80, 81, 88, 106, 110, 111,
+    113, 119, 135, 139, 143, 144, 179, 199, 389, 427, 443, 444, 445, 465,
+    513, 514, 515, 543, 544, 548, 554, 587, 631, 646, 873, 990, 993, 995,
+    1025, 1026, 1027, 1028, 1029, 1110, 1433, 1720, 1723, 1755, 1900, 2000,
+    2001, 2049, 2121, 2717, 3000, 3128, 3306, 3389, 3986, 4899, 5000, 5009,
+    5051, 5060, 5101, 5190, 5357, 5432, 5631, 5666, 5800, 5900, 6000, 6001,
+    6646, 7070, 8000, 8008, 8009, 8080, 8081, 8443, 8888, 9100, 9999, 10000,
+    32768, 49152, 49153, 49154, 49155, 49156, 49157
+)
+# fmt: on
+
+PORT_SETS = {"default": DEFAULT_PORTS, "top100": TOP_100_PORTS}
+
+
+def resolve_ports(values) -> tuple[int, ...]:
+    """Turn what someone typed after `--ports` into port numbers.
+
+    Accepts a set name or a list of numbers, and mixing them, because
+    `--ports top100 32400` is the obvious thing to want and refusing it would
+    only be pedantry.
+    """
+    ports = set()
+    for value in values:
+        text = str(value)
+        if text in PORT_SETS:
+            ports.update(PORT_SETS[text])
+            continue
+        if not text.isdigit() or not 0 < int(text) < 65536:
+            known = ", ".join(sorted(PORT_SETS))
+            raise ValueError(f"{text!r} is not a port number or a set ({known})")
+        ports.add(int(text))
+    return tuple(sorted(ports))
+
+
+# A packet's TTL is set by the sender and decremented per hop; on one broadcast
+# segment there are no hops, so what arrives is what the OS started with. These
+# are the three common starting values, and only an exact match earns a name -
+# a TTL of 32 is not "nearly 64", it is a device doing something else, and
+# rounding it into the nearest family would be a confident sentence about
+# nothing. Even an exact match is a hint: any of these can be reconfigured.
+TTL_ORIGINS = {64: "Linux, macOS or BSD", 128: "Windows", 255: "network gear"}
+
+_TTL = re.compile(r"ttl[=\s](\d+)", re.I)
+
 
 @dataclass(frozen=True)
 class Device:
@@ -64,6 +124,7 @@ class Device:
     hostname: str = ""
     services: str = ""
     ports: tuple[int, ...] = field(default=())
+    os_hint: str = ""
 
     def key(self) -> str:
         """Identity across scans.
@@ -192,18 +253,68 @@ def nudge(hosts, workers: int = 128) -> None:
         list(pool.map(ping_one, hosts))
 
 
+def _port_open(ip: str, port: int, timeout: float = 0.3) -> bool:
+    """TCP connect. Open means the handshake completed, nothing more."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            return sock.connect_ex((ip, port)) == 0
+    except OSError:
+        return False
+
+
+def scan_ports_many(pairs, timeout: float = 0.3) -> set:
+    """Every (ip, port) at once; returns the pairs that are open.
+
+    Flat rather than a pool of devices each walking its own port list. With ten
+    ports the difference was academic; with `top100` a device that drops packets
+    would otherwise cost a hundred consecutive timeouts, and the scan would take
+    the length of the port list rather than the length of one timeout.
+    """
+    pairs = list(pairs)
+    if not pairs:
+        return set()
+    with ThreadPoolExecutor(max_workers=min(PORT_WORKERS, len(pairs))) as pool:
+        results = pool.map(lambda pair: _port_open(*pair, timeout=timeout), pairs)
+        return {pair for pair, is_open in zip(pairs, results) if is_open}
+
+
 def scan_ports(ip: str, ports, timeout: float = 0.3) -> tuple[int, ...]:
-    """TCP connect scan. Open means the handshake completed, nothing more."""
-    open_ports = []
-    for port in ports:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(timeout)
-                if sock.connect_ex((ip, port)) == 0:
-                    open_ports.append(port)
-        except OSError:
-            continue
-    return tuple(sorted(open_ports))
+    """The open ports of one device."""
+    found = scan_ports_many([(ip, port) for port in ports], timeout=timeout)
+    return tuple(sorted(port for _, port in found))
+
+
+def os_family(ttl: int) -> str:
+    """The OS family a starting TTL suggests, phrased as the guess it is.
+
+    An unrecognised TTL is reported as the number alone. It is still an
+    observation worth keeping - two devices with the same odd TTL are probably
+    the same kind of thing - but it is not a family, so it does not get a name.
+    """
+    if not 0 < ttl <= 255:
+        return ""
+    name = TTL_ORIGINS.get(ttl)
+    return f"{name}? (TTL {ttl})" if name else f"TTL {ttl}"
+
+
+def ttl_hint(ip: str, runner=subprocess.run) -> str:
+    """OS family guessed from the TTL of one ping reply, or '' if it did not answer.
+
+    This is the only honest OS detection available without root: real
+    fingerprinting needs crafted packets and a raw socket. A TTL narrows it to a
+    family and nothing more, so the output says "Windows?" and quotes the number
+    it inferred that from. A device that drops ICMP - plenty of IoT gear does -
+    simply has no hint, which is the normal case rather than an error.
+    """
+    try:
+        proc = runner(
+            ["ping", "-c", "1", ip], capture_output=True, text=True, timeout=3
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    match = _TTL.search(proc.stdout or "")
+    return os_family(int(match.group(1))) if match else ""
 
 
 def grab_banners(pairs, timeout: float = 2.0) -> dict:
@@ -282,6 +393,10 @@ def discover(
         ip: mac for ip, mac in table.items() if ipaddress.ip_address(ip) in network
     }
 
+    open_ports: dict[str, list[int]] = {}
+    for ip, port in scan_ports_many([(ip, p) for ip in in_subnet for p in ports]):
+        open_ports.setdefault(ip, []).append(port)
+
     def observe(item):
         ip, mac = item
         return Device(
@@ -290,11 +405,12 @@ def discover(
             vendor=lookup_vendor(mac) if lookup_vendor else "",
             hostname=resolve_hostname(ip) if resolve_names else "",
             services=(services or {}).get(ip, ""),
-            ports=scan_ports(ip, ports) if ports else (),
+            ports=tuple(sorted(open_ports.get(ip, ()))),
+            os_hint=ttl_hint(ip),
         )
 
-    # Reverse DNS and the port scan are both waits, not work, and neither depends
-    # on any other device. Sequentially the scan took the sum of every timeout on
+    # Reverse DNS and the ping are both waits, not work, and neither depends on
+    # any other device. Sequentially the scan took the sum of every timeout on
     # the network; concurrently it takes the worst single device.
     with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
         devices = list(pool.map(observe, in_subnet.items()))

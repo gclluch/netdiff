@@ -13,11 +13,16 @@ from datetime import datetime
 from pathlib import Path
 
 from . import audit as audit_rules
-from . import mdns, oui, report, store, upnp
+from . import mdns, oui, probe, report, store, upnp
 from .diff import diff, summarise
-from .scan import discover, grab_banners, local_subnet
-
-DEFAULT_PORTS = (22, 80, 443, 445, 554, 1883, 3389, 5000, 8080, 8443)
+from .scan import (
+    DEFAULT_PORTS,
+    PORT_SETS,
+    discover,
+    grab_banners,
+    local_subnet,
+    resolve_ports,
+)
 
 
 def send_webhook(url: str, payload: dict, timeout: float = 10) -> str:
@@ -61,7 +66,7 @@ def resolve_subnet(args) -> None:
 
 def cmd_scan(args) -> int:
     resolve_subnet(args)
-    ports = () if args.no_ports else tuple(args.ports)
+    ports = () if args.no_ports else resolve_ports(args.ports)
     devices = discover(
         args.subnet,
         ports=ports,
@@ -106,7 +111,8 @@ def cmd_scan(args) -> int:
                 if device.ports
                 else ""
             )
-            print(f"  {device.ip:<15} {device.mac}  {label}{open_ports}")
+            hint = f"  {device.os_hint}" if device.os_hint else ""
+            print(f"  {device.ip:<15} {device.mac}  {label}{hint}{open_ports}")
         print(f"\nchanges since last scan: {summarise(changes)}")
         for change in changes:
             print(f"  {change}")
@@ -160,12 +166,13 @@ def print_headline(finding, is_new: bool = False) -> None:
     above a group, so any single line still says what it is once it has been
     copied somewhere else.
     """
-    print_field(finding.severity, f"{finding.title}{'   [NEW]' if is_new else ''}")
+    title = audit_rules.headline(finding)
+    print_field(finding.severity, f"{title}{'   [NEW]' if is_new else ''}")
 
 
 def print_lesson(finding, is_new: bool = False) -> None:
     """Render one finding as the lesson it is, not as a severity-coloured row."""
-    print(f"  {finding.title}{'   [NEW]' if is_new else ''}")
+    print(f"  {audit_rules.headline(finding)}{'   [NEW]' if is_new else ''}")
     print_field("evidence", finding.evidence, wrap=False)
     print_field("why", finding.why)
     print_field("fix", finding.fix)
@@ -198,7 +205,7 @@ def cmd_audit(args) -> int:
     resolve_subnet(args)
     devices = discover(
         args.subnet,
-        ports=tuple(args.ports),
+        ports=resolve_ports(args.ports),
         lookup_vendor=oui.lookup,
         resolve_names=not args.no_resolve,
         services={} if args.no_mdns else mdns.discover(),
@@ -206,8 +213,9 @@ def cmd_audit(args) -> int:
     banners = grab_banners(
         (device.ip, port) for device in devices for port in device.ports
     )
+    probes = probe.collect(devices, banners)
     gateway = None if args.no_upnp else upnp.probe_gateway(args.subnet)
-    findings = audit_rules.audit(devices, gateway, banners)
+    findings = audit_rules.audit(devices, gateway, banners, probes)
 
     conn = store.connect(args.db)
     scan_id = store.record_scan(conn, args.subnet, devices)
@@ -290,7 +298,8 @@ def cmd_inventory(args) -> int:
     print(f"{len(rows)} device(s) ever seen\n")
     for row in rows:
         label = device_label(row["hostname"], row["vendor"], row["services"])
-        print(f"{row['ip']:<15} {row['mac']}  {label}")
+        hint = f"  {row['os_hint']}" if row["os_hint"] else ""
+        print(f"{row['ip']:<15} {row['mac']}  {label}{hint}")
         print(
             f"    first {row['first_seen']}  last {row['last_seen']}  seen {row['times_seen']}x"
         )
@@ -327,7 +336,13 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="CIDR to scan, e.g. 192.168.1.0/24 - defaults to the network you are on",
     )
-    scan.add_argument("--ports", type=int, nargs="*", default=list(DEFAULT_PORTS))
+    scan.add_argument(
+        "--ports",
+        nargs="*",
+        default=list(DEFAULT_PORTS),
+        metavar="PORT|SET",
+        help=f"port numbers, or a named set ({', '.join(sorted(PORT_SETS))})",
+    )
     scan.add_argument("--no-ports", action="store_true", help="skip the port scan")
     scan.add_argument("--no-resolve", action="store_true", help="skip reverse DNS")
     scan.add_argument(
@@ -355,7 +370,13 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="CIDR to audit, e.g. 192.168.1.0/24 - defaults to the network you are on",
     )
-    aud.add_argument("--ports", type=int, nargs="*", default=list(DEFAULT_PORTS))
+    aud.add_argument(
+        "--ports",
+        nargs="*",
+        default=list(DEFAULT_PORTS),
+        metavar="PORT|SET",
+        help=f"port numbers, or a named set ({', '.join(sorted(PORT_SETS))})",
+    )
     aud.add_argument("--no-resolve", action="store_true", help="skip reverse DNS")
     aud.add_argument(
         "--no-mdns", action="store_true", help="skip asking devices what they are"

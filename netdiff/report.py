@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from html import escape
 
-from .audit import SEVERITY_ORDER
+from .audit import SEVERITY_ORDER, headline
 
 # Deliberately drab. A report that looks like a security product invites the
 # reader to skim the colours instead of the sentences, and the whole thesis here
@@ -78,7 +78,7 @@ def _finding_html(finding, is_new: bool) -> str:
         "<details>"
         f'<summary><span class="sev {esc(finding.severity)}">'
         f"{esc(finding.severity)}</span>"
-        f"<span>{esc(finding.title)}</span>{new}</summary>"
+        f"<span>{esc(headline(finding))}</span>{new}</summary>"
         f"<dl>{''.join(rows)}</dl>"
         "</details>"
     )
