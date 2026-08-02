@@ -117,6 +117,18 @@ def test_an_empty_audit_says_so_rather_than_rendering_a_blank_page():
     assert "<details>" not in out
 
 
+def test_the_headline_is_a_verdict_and_the_tally_is_demoted():
+    """`192.168.1.0/24 - 6 info` is jargon twice over to whoever this is sent to."""
+    out = page((finding(severity="info"), False), summary="6 info")
+    assert "<h1>Nothing on this network needs action</h1>" in out
+    assert "6 info" in out.split("</h1>")[1], "the tally still exists, one line down"
+
+
+def test_a_serious_finding_changes_the_headline_not_just_a_number():
+    critical = page((finding(severity="critical"), False), summary="1 critical")
+    assert "needs attention today" in critical.split("</h1>")[0]
+
+
 def test_the_footer_repeats_that_an_open_port_is_not_a_vulnerability():
     """The thesis has to survive the trip to whoever the file gets sent to."""
     assert "not a vulnerability" in page((finding(), False))

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from html import escape
 
-from .audit import SEVERITY_ORDER, headline
+from .audit import SEVERITY_ORDER, headline, verdict
 
 # Deliberately drab. A report that looks like a security product invites the
 # reader to skim the colours instead of the sentences, and the whole thesis here
@@ -32,8 +32,9 @@ STYLE = """
 :root { color-scheme: light dark; }
 body { font: 16px/1.6 system-ui, -apple-system, Segoe UI, sans-serif;
        max-width: 46rem; margin: 3rem auto; padding: 0 1.25rem; }
-h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
-.sub { opacity: .7; font-size: .9rem; margin: 0 0 2rem; }
+h1 { font-size: 1.4rem; margin: 0 0 .4rem; }
+.sub { opacity: .7; font-size: .9rem; margin: 0 0 1.2rem; }
+.lede { margin: 0 0 2rem; }
 details { border-top: 1px solid rgba(128,128,128,.3); padding: .7rem 0; }
 details:last-of-type { border-bottom: 1px solid rgba(128,128,128,.3); }
 summary { cursor: pointer; display: flex; gap: .7rem; align-items: baseline; }
@@ -94,18 +95,23 @@ def render(annotated, subnet: str, scan_id: int, started: str, summary: str) -> 
         annotated, key=lambda pair: (SEVERITY_ORDER[pair[0].severity], pair[0].device)
     )
     body = "".join(_finding_html(f, is_new) for f, is_new in findings) or (
-        "<p>Nothing to report - no devices answered, or none had open ports.</p>"
+        "<p>No devices answered, or none had open ports.</p>"
     )
+    # The tally is already the whole of the headline when there is nothing to
+    # report, so printing it again underneath just says it twice.
+    tally = f"{esc(summary)} - " if findings else ""
     return (
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>netdiff audit {esc(scan_id)} - {esc(subnet)}</title>"
         f"<style>{STYLE}</style></head><body>"
-        f"<h1>{esc(subnet)} - {esc(summary)}</h1>"
-        f'<p class="sub">audit {esc(scan_id)}, {esc(started)}. '
-        "Click any finding for the evidence it rests on, why it matters, how to "
-        "fix it, and a command you can run yourself to confirm it.</p>"
+        f"<h1>{esc(verdict([f for f, _ in findings]))}</h1>"
+        f'<p class="sub">{esc(subnet)} - {tally}'
+        f"audit {esc(scan_id)}, {esc(started)}</p>"
+        '<p class="lede">Click any finding for the evidence it rests on, why it '
+        "matters, how to fix it, and a command you can run yourself to confirm "
+        "it.</p>"
         f"{body}"
         "<footer>An open port is not a vulnerability - it is what a working "
         "device looks like. Only the findings above are claims about this "

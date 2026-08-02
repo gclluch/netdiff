@@ -110,7 +110,11 @@ def cmd_scan(args) -> int:
             )
         )
     else:
-        print(f"scan {scan_id}: {len(devices)} device(s) on {args.subnet}")
+        print(
+            audit_rules.pluralise(
+                f"scan {scan_id}: {len(devices)} device(s) on {args.subnet}"
+            )
+        )
         for device in devices:
             label = device_label(device.hostname, device.vendor, device.services)
             open_ports = (
@@ -246,7 +250,11 @@ def cmd_audit(args) -> int:
             audit_rules.summarise(findings),
         )
         Path(args.html).write_text(page, encoding="utf-8")
-        print(f"wrote {args.html} - {len(findings)} finding(s), open it in a browser")
+        print(
+            audit_rules.pluralise(
+                f"wrote {args.html} - {len(findings)} finding(s), open it in a browser"
+            )
+        )
         return 0
 
     if args.json:
@@ -340,9 +348,17 @@ def cmd_here(args) -> int:
         return 0
 
     print(f"here: {args.subnet} - {audit_rules.summarise(findings)}")
+    resolvers = list(observed["resolvers"])
     print(
-        f"gateway {observed['gateway'] or 'none'}, "
-        f"resolver(s) {', '.join(observed['resolvers']) or 'none'}\n"
+        audit_rules.pluralise(
+            f"gateway {observed['gateway'] or 'none'}, "
+            + (
+                f"{len(resolvers)} resolver(s): {', '.join(resolvers)}"
+                if resolvers
+                else "no resolvers"
+            )
+            + "\n"
+        )
     )
     severity = ""
     for finding in findings:
@@ -370,7 +386,7 @@ def cmd_inventory(args) -> int:
     if args.json:
         print(json.dumps([r | {"ports": list(r["ports"])} for r in rows], indent=2))
         return 0
-    print(f"{len(rows)} device(s) ever seen\n")
+    print(audit_rules.pluralise(f"{len(rows)} device(s) ever seen\n"))
     for row in rows:
         label = device_label(row["hostname"], row["vendor"], row["services"])
         hint = f"  {row['os_hint']}" if row["os_hint"] else ""

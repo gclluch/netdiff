@@ -9,7 +9,16 @@ Half of these tests assert that something is *not* reported. Those are the
 important half.
 """
 
-from netdiff.audit import RULES, audit, headline, summarise
+from netdiff.audit import (
+    RULES,
+    SEVERITY_ORDER,
+    VERDICTS,
+    audit,
+    headline,
+    pluralise,
+    summarise,
+    verdict,
+)
 from netdiff.probe import Certificate
 from netdiff.scan import Device
 from netdiff.upnp import Gateway, Mapping
@@ -467,6 +476,43 @@ def test_summarise_counts_by_severity_worst_first():
     )
     assert text.startswith("1 critical")
     assert "info" in text
+
+
+def test_a_count_of_one_reads_as_one_thing():
+    """`1 device(s)` is the one place the prose visibly gives up."""
+    assert pluralise("1 open port(s) observed") == "1 open port observed"
+    assert pluralise("4 open port(s) observed") == "4 open ports observed"
+    assert pluralise("0 device(s) ever seen") == "0 devices ever seen"
+
+
+def test_the_marker_binds_to_its_own_count_and_not_an_earlier_number():
+    """`port 22` and `3 algorithms` are in the same sentence - the 3 wins."""
+    out = pluralise("SSH on port 22 still offers 3 deprecated algorithm(s)")
+    assert out == "SSH on port 22 still offers 3 deprecated algorithms"
+
+
+def test_a_real_finding_never_reaches_a_reader_with_the_marker_in_it():
+    """`finding()` is where the count is known, so it is where this has to hold."""
+    for hit in audit([dev(ports=[80, 443])]):
+        for field in (hit.title, hit.evidence, hit.why, hit.fix, hit.verify):
+            assert "(s)" not in field, hit.rule
+
+
+def test_the_verdict_leads_with_what_to_do_not_with_a_tally():
+    """The HTML headline is read by someone who did not run the tool."""
+    device = dev(ip="192.168.1.23", ports=[23, 8080])
+    serious = audit([device], gw([mapping(client="192.168.1.23", internal=8080)]))
+    assert verdict(serious) == "Something on this network needs attention today"
+
+    quiet = [f for f in audit([dev(ports=[443])]) if f.severity == "info"]
+    assert quiet, "expected a quiet network to still produce info findings"
+    assert verdict(quiet) == "Nothing on this network needs action"
+
+
+def test_the_verdict_has_a_sentence_for_every_severity_a_rule_can_carry():
+    """A new severity would otherwise KeyError on the report, not on a test."""
+    assert set(VERDICTS) == set(SEVERITY_ORDER)
+    assert verdict([]) == "Nothing to report on this network"
 
 
 def test_a_headline_names_the_device_it_is_about():
