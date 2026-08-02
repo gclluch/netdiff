@@ -96,6 +96,22 @@ class Finding:
     verify: str
 
 
+# `4 open port(s)`. A rule cannot know its own count, so the templates carry the
+# marker and this resolves it where the count is finally known. Worth the three
+# lines because the alternative is a report whose whole claim is that the
+# sentences are the product, shipping `1 device(s) are reachable`.
+#
+# Deliberately narrow: a number, then at most four lowercase words, then the
+# marker. Digits cannot appear inside the noun phrase, so `offers 3 deprecated
+# algorithm(s)` binds to the 3 and not to the port number earlier in the line.
+_COUNTED = re.compile(r"(\d+) ((?:[a-z-]+ ){0,3}[a-z-]+)\(s\)")
+
+
+def pluralise(text: str) -> str:
+    """`3 open port(s)` -> `3 open ports`, `1 open port(s)` -> `1 open port`."""
+    return _COUNTED.sub(lambda m: f"{m[1]} {m[2]}" + ("" if m[1] == "1" else "s"), text)
+
+
 def headline(finding) -> str:
     """The title, prefixed with the device when the title does not name it.
 
@@ -544,7 +560,7 @@ RULES = {
     },
     "here-client-isolation-off": {
         "severity": "info",
-        "title": "{count} other device(s) on this network are reachable from here",
+        "title": "{count} other device(s) on this network can be reached from here",
         "why": (
             "Not a problem by itself, and the normal case for a home network - it "
             "is what lets your laptop print. Worth knowing on a network you do not "
@@ -591,7 +607,7 @@ RULES = {
     },
     "here-own-ports-exposed": {
         "severity": "medium",
-        "title": "{count} service(s) on this machine are bound to the network, not loopback",
+        "title": "this machine offers {count} service(s) to the network, not just to itself",
         "why": (
             "These are your ports, not somebody else's. A service bound only to "
             "127.0.0.1 cannot be reached from the network at all; these answered on "
@@ -624,7 +640,7 @@ RULES = {
     },
     "open-ports-noted": {
         "severity": "info",
-        "title": "{count} open port(s) observed, and not reported as problems",
+        "title": "{count} open port(s) observed here, and none reported as a problem",
         "why": (
             "An open port means a service accepted a TCP handshake. That is not a "
             "vulnerability - it is what a working device looks like. Tools that list "
@@ -651,15 +667,18 @@ def finding(rule: str, device: str, evidence: str, **context) -> Finding:
     """
     spec = RULES[rule]
     fields = dict(context, device=device)
+    # The count is known here and nowhere earlier, so this is where `port(s)`
+    # stops being a template and becomes a sentence - including in `evidence`,
+    # which the rules build with the same marker.
     return Finding(
         rule=rule,
         severity=spec["severity"],
         device=device,
-        title=spec["title"].format(**fields),
-        evidence=evidence,
-        why=spec["why"].format(**fields),
-        fix=spec["fix"].format(**fields),
-        verify=spec["verify"].format(**fields),
+        title=pluralise(spec["title"].format(**fields)),
+        evidence=pluralise(evidence),
+        why=pluralise(spec["why"].format(**fields)),
+        fix=pluralise(spec["fix"].format(**fields)),
+        verify=pluralise(spec["verify"].format(**fields)),
     )
 
 
@@ -1101,9 +1120,37 @@ def audit(
 
 
 def summarise(findings) -> str:
-    """'1 critical, 2 high' - info is counted but never leads."""
+    """'1 critical, 2 high' - info is counted but never leads.
+
+    A tally, for the terminal. Whoever typed the command has the context to read
+    one, and density is what a terminal line is for. `verdict` is the other
+    audience.
+    """
     counts = {}
     for item in findings:
         counts[item.severity] = counts.get(item.severity, 0) + 1
     parts = [f"{counts[name]} {name}" for name in SEVERITY_ORDER if counts.get(name)]
     return ", ".join(parts) if parts else "nothing to report"
+
+
+# The HTML report goes to someone who did not run the tool and will not run it -
+# a housemate, a landlord, whoever actually administers the router. A tally is
+# the wrong headline for them: "6 info" is two pieces of jargon and no verdict,
+# and it makes "nothing needs doing" and "act today" look like the same kind of
+# statement. So the page leads with the answer and keeps the tally underneath.
+#
+# Graded by severity rather than by rule, deliberately. Tying the critical line
+# to the one rule that currently produces critical findings would read better
+# today and lie the first time a second such rule is added.
+VERDICTS = {
+    "critical": "Something on this network needs attention today",
+    "high": "Something on this network needs fixing",
+    "medium": "Nothing urgent, but a few things are worth changing",
+    "info": "Nothing on this network needs action",
+}
+
+
+def verdict(findings) -> str:
+    """One sentence, for a reader who may not read the second one."""
+    worst = min((f.severity for f in findings), key=SEVERITY_ORDER.get, default=None)
+    return VERDICTS[worst] if worst else "Nothing to report on this network"
