@@ -219,13 +219,14 @@ def smb_dialect(ip: str, port: int = 445, timeout: float = 3.0) -> str:
 DNS_PROBE_NAME = "example.com"
 # Fixed rather than random: it only has to match our own reply on a socket we
 # connected ourselves. Randomising it would be cargo-culted cache-poisoning
-# defence for a query whose answer is thrown away.
-_DNS_ID = 0x1D1F
+# defence for a query whose answer is thrown away. Public because `here.py`
+# builds its queries with `dns_query` and has to recognise the replies.
+DNS_ID = 0x1D1F
 
 
 def dns_query(name: str = DNS_PROBE_NAME) -> bytes:
     """One A query with the recursion-desired bit set."""
-    header = struct.pack("!HHHHHH", _DNS_ID, 0x0100, 1, 0, 0, 0)
+    header = struct.pack("!HHHHHH", DNS_ID, 0x0100, 1, 0, 0, 0)
     return header + encode_name(name) + struct.pack("!HH", 1, 1)
 
 
@@ -234,7 +235,7 @@ def parse_dns_reply(data: bytes) -> str:
     if len(data) < 12:
         return ""
     ident, flags, _, answers, _, _ = struct.unpack("!HHHHHH", data[:12])
-    if ident != _DNS_ID or not flags & 0x8000:
+    if ident != DNS_ID or not flags & 0x8000:
         return ""
     if flags & 0x000F or not flags & 0x0080 or not answers:
         # rcode must be 0, the recursion-available bit must be set, and there

@@ -175,7 +175,9 @@ def test_an_omitted_subnet_is_filled_in_and_announced(monkeypatch, capsys):
     args = type("Args", (), {"subnet": None})()
     cli.resolve_subnet(args)
     assert args.subnet == "10.1.2.0/24"
-    assert "10.1.2.0/24" in capsys.readouterr().out, "a scan must show its target"
+    captured = capsys.readouterr()
+    assert "10.1.2.0/24" in captured.err, "a scan must show its target"
+    assert captured.out == "", "and must not put the notice inside --json output"
 
 
 def test_an_explicit_subnet_is_left_alone(monkeypatch, capsys):
