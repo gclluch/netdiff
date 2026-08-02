@@ -196,11 +196,20 @@ def parse_records(data: bytes):
 
 
 def _decode_txt(rdata: bytes) -> dict:
-    """TXT rdata is a run of length-prefixed key=value strings."""
+    """TXT rdata is a run of length-prefixed key=value strings.
+
+    A string claiming to be longer than the rdata holding it stops the walk, for
+    the same reason `parse_records` stops on an over-long `rdlen`: the slice
+    would silently come back short, and `model=Mac15,7` truncated to `model=Mac`
+    is a wrong answer rather than a missing one. Whatever was read before the bad
+    length is kept - it was well-formed.
+    """
     out = {}
     i = 0
     while i < len(rdata):
         length = rdata[i]
+        if i + 1 + length > len(rdata):
+            break
         chunk = rdata[i + 1 : i + 1 + length].decode("utf-8", "replace")
         key, _, value = chunk.partition("=")
         if key:

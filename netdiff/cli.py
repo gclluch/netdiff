@@ -1,4 +1,4 @@
-"""Command line interface: scan, audit, inventory, history."""
+"""Command line interface: scan, audit, glossary, inventory, history."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import audit as audit_rules
-from . import mdns, oui, probe, report, store, upnp
+from . import glossary, mdns, oui, probe, report, store, upnp
 from .diff import diff, summarise
 from .scan import (
     DEFAULT_PORTS,
@@ -286,6 +286,31 @@ def cmd_audit(args) -> int:
     return 1 if args.fail_on_finding and serious else 0
 
 
+def cmd_glossary(args) -> int:
+    """The vocabulary, either all of it in one line each or one of it in full."""
+    if not args.term:
+        print(
+            f"{len(glossary.TERMS)} terms. `netdiff glossary TERM` for any of them.\n"
+        )
+        width = max(len(slug) for slug in glossary.TERMS)
+        for slug, entry in sorted(glossary.TERMS.items()):
+            print(f"  {slug:<{width}}  {entry['short']}")
+        print("\nFor the findings rather than the words: netdiff audit --explain RULE")
+        return 0
+
+    entry = glossary.TERMS.get(args.term.lower())
+    if entry is None:
+        known = ", ".join(sorted(glossary.TERMS))
+        print(f"unknown term {args.term!r}\nknown terms: {known}", file=sys.stderr)
+        return 2
+
+    print(f"{args.term.lower()} - {entry['name']}\n")
+    print_field("what", entry["long"])
+    if entry["see"]:
+        print_field("see also", ", ".join(entry["see"]))
+    return 0
+
+
 def cmd_inventory(args) -> int:
     conn = store.connect(args.db)
     rows = store.inventory(conn)
@@ -405,6 +430,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aud.add_argument("--json", action="store_true")
     aud.set_defaults(func=cmd_audit)
+
+    gloss = sub.add_parser(
+        "glossary",
+        help="the words the rest of the output is written in",
+        description=(
+            "Every term netdiff itself prints, explained. Run it with no argument "
+            "for the list, or with a term for the whole entry."
+        ),
+    )
+    gloss.add_argument("term", nargs="?", help="a term to explain, e.g. upnp")
+    gloss.set_defaults(func=cmd_glossary)
 
     inv = sub.add_parser("inventory", help="every device ever seen")
     inv.add_argument("--json", action="store_true")
