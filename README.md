@@ -110,6 +110,35 @@ There is no CVE matching here. Home-LAN banners rarely carry a precise enough ve
 
 **Four questions a port number cannot answer.** Port 445 being open says nothing about which SMB dialect a server accepts, so netdiff offers it the 1996 dialect alone and reports what comes back. Port 443 being open says nothing about the certificate behind it, so the certificate is read and judged on its own dates and names. An SSH server announces the algorithms it will negotiate with before authentication happens at all, so those are read from the handshake rather than by a failed login. And a device either resolves a name it has no authority over or it does not. Each is one exchange, sends nothing a server stores, and yields evidence rather than an inference.
 
+### The words, not just the findings
+
+`netdiff audit --explain RULE` explains a finding. `netdiff glossary` explains the vocabulary a finding is written in, which is the other half of the same job - "the router answered an unauthenticated control request" only lands on someone who already knows what UPnP is, and the people this tool helps most are exactly the ones who do not.
+
+```console
+$ netdiff glossary
+30 terms. `netdiff glossary TERM` for any of them.
+
+  arp                    how a device finds the hardware address behind an IP
+  captive-portal         a network that intercepts your traffic until you agree to something
+  open-port              a port where something accepted a connection - not a vulnerability
+  self-signed            a certificate that vouches for itself - normal on a home network
+  ...
+
+$ netdiff glossary self-signed
+self-signed - self-signed certificate
+
+    what      Subject and issuer are the same name: nothing external attests to it. This
+              is the ordinary case for a router or a NAS, which has no way to obtain a
+              certificate a browser would trust for a private address. The traffic is
+              genuinely encrypted; what is missing is identity, so the padlock says the
+              connection is private without saying who it is private with. It is why the
+              device shows a warning, and it is not a warning worth chasing. Do not turn
+              TLS off to make it go away.
+    see also  certificate, certificate-authority, tls
+```
+
+One rule keeps it from becoming an encyclopaedia of networking: **a term earns an entry only if netdiff itself prints it.** Anything the tool never says is somebody else's glossary.
+
 ### Read-only, and it means it
 
 The audit **never sends credentials, never writes to a scanned host, and never changes router configuration.** It reads banners that services volunteer to anyone who connects, and it calls exactly one UPnP method - `GetGenericPortMappingEntry`. There is deliberately no `AddPortMapping` code path in the source.
@@ -150,6 +179,8 @@ netdiff audit 192.168.1.0/24             # what this network exposes, and why it
 netdiff audit --ports top100 3000 5432   # a set, plus whatever else you run
 netdiff inventory                        # every device ever seen, first and last sighting
 netdiff history                          # diff the two most recent scans
+netdiff glossary                         # every word the output uses, one line each
+netdiff glossary upnp                    # ...and the whole entry for one of them
 
 # alerting: POST a JSON payload anywhere when something changed
 netdiff scan 192.168.1.0/24 --webhook https://ntfy.sh/my-topic
