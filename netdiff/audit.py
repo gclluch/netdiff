@@ -23,7 +23,9 @@ gap, and internet-reachable is attack surface.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import date
 
 from .scan import HTTP_PORTS
 
@@ -44,6 +46,36 @@ PLAINTEXT_PROTOCOLS = {
     5900: ("VNC", "the screen contents, and often the password too", True),
 }
 
+# SSH algorithms that are deprecated rather than merely old, with the reason -
+# the reason is the finding, since "weak" on its own is a word not an argument.
+# A server offering these still works; it also still accepts them, which is what
+# a client downgrade attack needs.
+WEAK_SSH_ALGORITHMS = {
+    "diffie-hellman-group1-sha1": "1024-bit key exchange, breakable by Logjam",
+    "diffie-hellman-group14-sha1": "SHA-1 key exchange",
+    "diffie-hellman-group-exchange-sha1": "SHA-1 key exchange",
+    "ssh-rsa": "SHA-1 signatures, disabled by OpenSSH 8.8 in 2021",
+    "ssh-dss": "1024-bit DSA, removed from OpenSSH in 2015",
+    "arcfour": "RC4, biased keystream",
+    "arcfour128": "RC4, biased keystream",
+    "arcfour256": "RC4, biased keystream",
+    "3des-cbc": "56-bit effective key",
+    "aes128-cbc": "CBC in SSH is encrypt-and-MAC, which leaks plaintext",
+    "aes192-cbc": "CBC in SSH is encrypt-and-MAC, which leaks plaintext",
+    "aes256-cbc": "CBC in SSH is encrypt-and-MAC, which leaks plaintext",
+    "blowfish-cbc": "64-bit block cipher in CBC mode",
+    "cast128-cbc": "64-bit block cipher in CBC mode",
+    "hmac-md5": "MD5 integrity",
+    "hmac-md5-96": "MD5 integrity, truncated",
+    "hmac-sha1-96": "truncated SHA-1 integrity",
+    "none": "no encryption at all, if a client asks for it",
+}
+
+# `lighttpd/1.4.35`, `OpenSSH_7.4`, `Boa/0.94`. Two characters of name, then a
+# separator, then a dotted number - narrow on purpose, because a looser pattern
+# reads version numbers out of dates, ETags and session cookies.
+_VERSION = re.compile(r"\b([A-Za-z][A-Za-z0-9.+-]{1,30})[/_](\d+(?:\.\d+)+[\w.-]*)")
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -61,6 +93,19 @@ class Finding:
     why: str
     fix: str
     verify: str
+
+
+def headline(finding) -> str:
+    """The title, prefixed with the device when the title does not name it.
+
+    Both renderers show findings as a flat list with no device column, which was
+    readable while a quiet network produced one or two of them. It stopped being
+    readable the moment a report could say "port 80 identifies itself as
+    lighttpd 1.4.59" three times about three different devices.
+    """
+    if finding.device in ("", "network") or finding.device in finding.title:
+        return finding.title
+    return f"{finding.device}  {finding.title}"
 
 
 RULES = {
@@ -211,6 +256,143 @@ RULES = {
             "nc {device} {port}\nThe first line it prints is the version it speaks."
         ),
     },
+    "smb-v1": {
+        "severity": "high",
+        "title": "SMBv1 file sharing is enabled on port {port}",
+        "why": (
+            "This device agreed to speak the 1996 version of the Windows file "
+            "sharing protocol. SMBv1 cannot verify who it is talking to, so a "
+            "device on the same network can sit in the middle of a file transfer "
+            "unnoticed. It is also the protocol EternalBlue and WannaCry travelled "
+            "over, and worms built on it are still circulating years later because "
+            "the devices still answering are the ones nobody updates. Microsoft "
+            "stopped installing it by default in 2017."
+        ),
+        "fix": (
+            "On Windows: Control Panel, Turn Windows features on or off, untick "
+            "'SMB 1.0/CIFS File Sharing Support'. On a NAS, look for a minimum SMB "
+            "protocol setting and set it to SMB2 or SMB3 - every client made in the "
+            "last decade speaks those. If a device only offers SMBv1 and cannot be "
+            "updated, it should not be on the same network as anything you care about."
+        ),
+        "verify": (
+            "nmap --script smb-protocols -p445 {device}\n"
+            "Anything listing a dialect of 'NT LM 0.12' is SMBv1."
+        ),
+    },
+    "ssh-weak-algorithms": {
+        "severity": "medium",
+        "title": "SSH on port {port} still offers {count} deprecated algorithm(s)",
+        "why": (
+            "SSH negotiates its cryptography with each client, and this server is "
+            "still willing to accept: {detail}. A current client will pick something "
+            "stronger, so this is not a break - it is a downgrade waiting for an old "
+            "client or someone able to interfere with the negotiation. It is also a "
+            "reliable sign of firmware that has not been updated in years, which is "
+            "usually the more useful thing to learn from it."
+        ),
+        "fix": (
+            "Update the device's firmware first - modern OpenSSH drops these by "
+            "default and this list disappears on its own. Where that is not "
+            "possible, set KexAlgorithms, Ciphers and MACs explicitly in sshd_config "
+            "to the current defaults."
+        ),
+        "verify": (
+            "ssh -vv {device} 2>&1 | grep 'peer server KEXINIT'\n"
+            "Or: nmap --script ssh2-enum-algos -p {port} {device}"
+        ),
+    },
+    "tls-cert-expired": {
+        "severity": "medium",
+        "title": "the certificate on port {port} expired on {not_after}",
+        "why": (
+            "Encryption still works, so traffic is not readable - but every browser "
+            "and app reaching this device now shows a warning, and the only way to "
+            "keep using it is to click through that warning. Once clicking through "
+            "is routine, a genuine interception looks exactly like the thing you "
+            "already dismiss every day. That is the real cost, and it is a habit "
+            "rather than a vulnerability."
+        ),
+        "fix": (
+            "Reissue the certificate in the device's admin page. Many devices "
+            "regenerate a self-signed one on request, or after a factory reset. If "
+            "the device cannot, its firmware is old enough that the certificate is "
+            "the smaller problem."
+        ),
+        "verify": (
+            "openssl s_client -connect {device}:{port} </dev/null 2>/dev/null"
+            " | openssl x509 -noout -dates"
+        ),
+    },
+    "tls-cert-untrusted": {
+        "severity": "info",
+        "title": "port {port} uses a certificate that vouches for itself",
+        "why": (
+            "Explicitly not a problem on its own, and the normal case for home "
+            "equipment - a router or NAS has no way to obtain a certificate a "
+            "browser would trust for a private address. The traffic is genuinely "
+            "encrypted. What is missing is identity: nothing here proves the device "
+            "answering is the one you meant, so the padlock says the connection is "
+            "private without saying who it is private with. Worth knowing because it "
+            "is why this device shows a warning, and why that warning is not one to "
+            "chase."
+        ),
+        "fix": (
+            "Nothing, for most devices. If you want the warning gone properly, "
+            "run a local certificate authority or use a tool that issues real "
+            "certificates for internal names. Do not disable TLS to avoid the "
+            "warning - encrypted-but-unverified beats plaintext every time."
+        ),
+        "verify": (
+            "openssl s_client -connect {device}:{port} </dev/null 2>/dev/null"
+            " | openssl x509 -noout -subject -issuer\n"
+            "The same name on both lines means it signed its own certificate."
+        ),
+    },
+    "dns-recursion-open": {
+        "severity": "info",
+        "title": "{device} resolves internet names for anything that asks it",
+        "why": (
+            "This device answered a query for a name it does not own, which makes it "
+            "a recursive resolver. On a home network that is usually just the router "
+            "doing its job, and it is not a problem while it is only reachable "
+            "from inside. It becomes one if the same device is reachable from the "
+            "internet: an open resolver is the classic amplifier for denial of "
+            "service attacks, because a small forged query produces a large reply "
+            "sent to whoever the attacker named. Check whether port 53 appears in "
+            "any exposure finding above."
+        ),
+        "fix": (
+            "Nothing, if this is your router and nothing forwards port 53 inward. "
+            "If it is not your router, ask why that device is running a resolver at "
+            "all. Where the option exists, restrict recursion to the local subnet."
+        ),
+        "verify": (
+            "dig @{device} example.com +short\n"
+            "An answer means it resolved a name it is not authoritative for."
+        ),
+    },
+    "service-version": {
+        "severity": "info",
+        "title": "port {port} identifies itself as {product} {version}",
+        "why": (
+            "Not a finding, a fact: this is the software the service names when "
+            "asked, quoted rather than guessed. netdiff does not match it against a "
+            "vulnerability database - home equipment rarely announces a precise "
+            "enough version for that to be honest, and a list of maybe-CVEs reads "
+            "as alarming while meaning nothing. What this is good for is the "
+            "question a database cannot answer: is this version still supported? A "
+            "web server from 2014 on a device with no firmware updates left is worth "
+            "more of your attention than any severity score."
+        ),
+        "fix": (
+            "Search for '{product} {version} release date' and for the vendor's "
+            "support page for this device. If the version predates the last "
+            "firmware update you can install, install it. If the vendor has stopped "
+            "shipping updates, that is the finding."
+        ),
+        "verify": "curl -sI http://{device}:{port}/ | grep -i server",
+    },
     "open-ports-noted": {
         "severity": "info",
         "title": "{count} open port(s) observed, and not reported as problems",
@@ -343,12 +525,122 @@ def rule_ssh_v1(ip: str, port: int, banner: str):
     return finding("ssh-v1", ip, banner.splitlines()[0].strip(), port=port)
 
 
-BANNER_RULES = (rule_plaintext_protocol, rule_http_auth_plaintext, rule_ssh_v1)
+def _version_line(banner: str) -> str:
+    """The line of a banner that names software, if one does.
+
+    An HTTP `Server:` header and an SSH version string are both declarations of
+    identity. Anything else falls back to the first line, which is where every
+    protocol that greets you puts its name - except an HTTP status line, where
+    `HTTP/1.0` is the version of the protocol and says nothing about the
+    software. Reporting that as a product would be the exact failure this tool
+    exists to avoid: a confident sentence about nothing.
+    """
+    for line in banner.splitlines():
+        if line.lower().startswith("server:") or line.startswith("SSH-"):
+            return line.strip()
+    lines = [
+        line for line in banner.strip().splitlines() if not line.startswith("HTTP/")
+    ]
+    return lines[0].strip() if lines else ""
 
 
-def audit(devices, gateway=None, banners=None) -> list[Finding]:
-    """Apply every rule. `banners` maps (ip, port) -> whatever the service said."""
+def rule_service_version(ip: str, port: int, banner: str):
+    """The software a service names, quoted rather than interpreted."""
+    line = _version_line(banner)
+    match = _VERSION.search(line)
+    if not match:
+        return None
+    return finding(
+        "service-version",
+        ip,
+        line,
+        port=port,
+        product=match.group(1),
+        version=match.group(2),
+    )
+
+
+BANNER_RULES = (
+    rule_plaintext_protocol,
+    rule_http_auth_plaintext,
+    rule_ssh_v1,
+    rule_service_version,
+)
+
+
+def rule_smbv1(ip: str, port: int, dialect: str):
+    """The server accepted an offer of the 1996 dialect and nothing else."""
+    if not dialect:
+        return None
+    return finding(
+        "smb-v1",
+        ip,
+        f"negotiated dialect {dialect!r} when offered no other option",
+        port=port,
+    )
+
+
+def rule_ssh_weak_algorithms(ip: str, port: int, algorithms):
+    """Deprecated algorithms in what the server offered to negotiate with."""
+    weak = [name for name in algorithms if name in WEAK_SSH_ALGORITHMS]
+    if not weak:
+        return None
+    return finding(
+        "ssh-weak-algorithms",
+        ip,
+        "offered: " + ", ".join(weak),
+        port=port,
+        count=len(weak),
+        detail="; ".join(f"{name} ({WEAK_SSH_ALGORITHMS[name]})" for name in weak),
+    )
+
+
+def rule_tls_cert_expired(ip: str, port: int, cert, today: str):
+    """Past its notAfter, by its own dates."""
+    if cert is None or not cert.not_after or cert.not_after >= today:
+        return None
+    return finding(
+        "tls-cert-expired",
+        ip,
+        f"certificate valid {cert.not_before} to {cert.not_after}, today is {today}",
+        port=port,
+        not_after=cert.not_after,
+    )
+
+
+def rule_tls_cert_untrusted(ip: str, port: int, cert):
+    """Issuer and subject are the same name, so nothing external vouches for it."""
+    if cert is None or not cert.self_signed:
+        return None
+    return finding(
+        "tls-cert-untrusted",
+        ip,
+        f"subject and issuer are both {cert.subject!r}; "
+        f"valid {cert.not_before} to {cert.not_after}",
+        port=port,
+    )
+
+
+def rule_dns_recursion(ip: str, evidence: str):
+    """It resolved a name it has no authority over."""
+    if not evidence:
+        return None
+    return finding("dns-recursion-open", ip, evidence)
+
+
+def audit(
+    devices, gateway=None, banners=None, probes=None, today=None
+) -> list[Finding]:
+    """Apply every rule.
+
+    `banners` maps (ip, port) -> whatever the service said. `probes` is the dict
+    `probe.collect()` returns: certificates, SMB dialects and SSH algorithms per
+    (ip, port), and DNS recursion evidence per ip. Both are plain data gathered
+    by the caller, which is what keeps this module free of sockets.
+    """
     banners = banners or {}
+    probes = probes or {}
+    today = today or date.today().isoformat()
     findings = []
 
     control = rule_upnp_control_open(gateway)
@@ -359,15 +651,26 @@ def audit(devices, gateway=None, banners=None) -> list[Finding]:
             if mapping.enabled:
                 findings.append(rule_mapping(mapping, devices))
 
+    certs = probes.get("certs", {})
+    smb = probes.get("smb", {})
+    ssh = probes.get("ssh", {})
+    resolvers = probes.get("dns", {})
+
     open_ports = 0
     for device in devices:
         for port in device.ports:
             open_ports += 1
-            banner = banners.get((device.ip, port), "")
-            for rule in BANNER_RULES:
-                hit = rule(device.ip, port, banner)
-                if hit:
-                    findings.append(hit)
+            pair = (device.ip, port)
+            banner = banners.get(pair, "")
+            hits = [rule(device.ip, port, banner) for rule in BANNER_RULES]
+            hits.append(rule_smbv1(device.ip, port, smb.get(pair, "")))
+            hits.append(rule_ssh_weak_algorithms(device.ip, port, ssh.get(pair, ())))
+            hits.append(rule_tls_cert_expired(device.ip, port, certs.get(pair), today))
+            hits.append(rule_tls_cert_untrusted(device.ip, port, certs.get(pair)))
+            findings.extend(hit for hit in hits if hit)
+        resolver = rule_dns_recursion(device.ip, resolvers.get(device.ip, ""))
+        if resolver:
+            findings.append(resolver)
 
     if open_ports:
         findings.append(

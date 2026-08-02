@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS observations (
     hostname  TEXT NOT NULL DEFAULT '',
     services  TEXT NOT NULL DEFAULT '',
     ports     TEXT NOT NULL DEFAULT '',
+    os_hint   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (scan_id, mac)
 );
 CREATE INDEX IF NOT EXISTS observations_mac ON observations(mac);
@@ -60,7 +61,10 @@ def connect(path=DEFAULT_PATH) -> sqlite3.Connection:
 # nothing to a table that already exists, and people have history going back
 # months, so a new column has to be added explicitly or every read of it fails
 # with "no such column" on exactly the databases worth keeping.
-ADDED_COLUMNS = (("observations", "services", "TEXT NOT NULL DEFAULT ''"),)
+ADDED_COLUMNS = (
+    ("observations", "services", "TEXT NOT NULL DEFAULT ''"),
+    ("observations", "os_hint", "TEXT NOT NULL DEFAULT ''"),
+)
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -98,8 +102,8 @@ def record_scan(conn: sqlite3.Connection, subnet: str, devices) -> int:
         scan_id = cursor.lastrowid
         conn.executemany(
             "INSERT INTO observations"
-            " (scan_id, mac, ip, vendor, hostname, services, ports)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " (scan_id, mac, ip, vendor, hostname, services, ports, os_hint)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     scan_id,
@@ -109,6 +113,7 @@ def record_scan(conn: sqlite3.Connection, subnet: str, devices) -> int:
                     d.hostname,
                     d.services,
                     _ports_to_text(d.ports),
+                    d.os_hint,
                 )
                 for d in devices
             ],
@@ -118,7 +123,7 @@ def record_scan(conn: sqlite3.Connection, subnet: str, devices) -> int:
 
 def load_scan(conn: sqlite3.Connection, scan_id: int) -> list[Device]:
     rows = conn.execute(
-        "SELECT mac, ip, vendor, hostname, services, ports FROM observations"
+        "SELECT mac, ip, vendor, hostname, services, ports, os_hint FROM observations"
         " WHERE scan_id = ?",
         (scan_id,),
     ).fetchall()
@@ -130,6 +135,7 @@ def load_scan(conn: sqlite3.Connection, scan_id: int) -> list[Device]:
             hostname=r["hostname"],
             services=r["services"],
             ports=_ports_from_text(r["ports"]),
+            os_hint=r["os_hint"],
         )
         for r in rows
     ]
@@ -223,7 +229,7 @@ def inventory(conn: sqlite3.Connection) -> list[dict]:
     out = []
     for row in rows:
         latest = conn.execute(
-            "SELECT ip, vendor, hostname, services, ports FROM observations o"
+            "SELECT ip, vendor, hostname, services, ports, os_hint FROM observations o"
             " JOIN scans s ON s.id = o.scan_id WHERE o.mac = ?"
             " ORDER BY s.id DESC LIMIT 1",
             (row["mac"],),
@@ -239,6 +245,7 @@ def inventory(conn: sqlite3.Connection) -> list[dict]:
                 "hostname": latest["hostname"],
                 "services": latest["services"],
                 "ports": _ports_from_text(latest["ports"]),
+                "os_hint": latest["os_hint"],
             }
         )
     return out

@@ -195,7 +195,10 @@ def test_devices_are_scanned_concurrently(monkeypatch):
     table = {f"192.168.1.{n}": f"aa:bb:cc:00:00:{n:02x}" for n in range(1, 13)}
     monkeypatch.setattr(scan, "nudge", lambda *a, **k: None)
     monkeypatch.setattr(scan, "read_arp_table", lambda: table)
-    monkeypatch.setattr(scan, "scan_ports", lambda ip, ports: time.sleep(0.2) or ())
+    monkeypatch.setattr(scan, "ttl_hint", lambda ip: time.sleep(0.2) or "")
+    monkeypatch.setattr(
+        scan, "_port_open", lambda ip, port, timeout=0.3: time.sleep(0.2) or False
+    )
 
     start = time.monotonic()
     devices = scan.discover(
@@ -206,7 +209,18 @@ def test_devices_are_scanned_concurrently(monkeypatch):
     assert [d.ip for d in devices] == sorted(
         table, key=lambda ip: int(ip.split(".")[3])
     )
-    assert elapsed < 1.0, f"12 devices x 0.2s took {elapsed:.1f}s - run sequentially?"
+    assert elapsed < 1.0, f"12 devices x 0.4s took {elapsed:.1f}s - run sequentially?"
+
+
+def test_a_long_port_list_costs_one_timeout_not_a_hundred(monkeypatch):
+    """The point of `--ports top100`: ports overlap, they do not queue."""
+    monkeypatch.setattr(
+        scan, "_port_open", lambda ip, port, timeout=0.3: time.sleep(0.2) or False
+    )
+    start = time.monotonic()
+    assert scan.scan_ports("192.168.1.10", scan.TOP_100_PORTS) == ()
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f"100 ports x 0.2s took {elapsed:.1f}s - run sequentially?"
 
 
 def test_banners_are_gathered_concurrently(monkeypatch):
@@ -227,6 +241,67 @@ def test_no_open_ports_means_no_banner_work():
     assert scan.grab_banners([]) == {}
 
 
+# --- choosing what to scan, and guessing what answered -----------------------
+
+
+def test_a_named_port_set_expands_to_its_ports():
+    assert scan.resolve_ports(["top100"]) == scan.TOP_100_PORTS
+    assert scan.resolve_ports(["default"]) == tuple(sorted(scan.DEFAULT_PORTS))
+
+
+def test_numbers_and_a_set_can_be_mixed_and_are_deduplicated():
+    assert scan.resolve_ports(["default", "22", "32400"]) == tuple(
+        sorted(set(scan.DEFAULT_PORTS) | {32400})
+    )
+
+
+@pytest.mark.parametrize("bad", ["top1000", "0", "65536", "-1", "80/tcp", ""])
+def test_something_that_is_neither_is_a_message_not_a_traceback(bad):
+    with pytest.raises(ValueError, match="not a port number"):
+        scan.resolve_ports([bad])
+
+
+def test_the_top_100_is_a_hundred_ports_in_order():
+    assert len(set(scan.TOP_100_PORTS)) == 100
+    assert list(scan.TOP_100_PORTS) == sorted(scan.TOP_100_PORTS)
+
+
+@pytest.mark.parametrize(
+    "ttl, expect", [(64, "Linux"), (128, "Windows"), (255, "network gear")]
+)
+def test_a_ttl_suggests_an_os_family_and_says_it_is_a_guess(ttl, expect):
+    hint = scan.os_family(ttl)
+    assert expect in hint
+    assert "?" in hint and str(ttl) in hint, "a guess has to look like one"
+
+
+def test_an_unrecognised_ttl_is_reported_as_a_number_not_a_family():
+    """32 is not "nearly 64". Rounding it into a family would be invention."""
+    assert scan.os_family(32) == "TTL 32"
+
+
+def test_a_ttl_nothing_could_have_sent_claims_nothing():
+    assert scan.os_family(0) == ""
+    assert scan.os_family(300) == ""
+
+
+def test_the_ttl_is_read_from_a_real_ping_line():
+    line = "64 bytes from 192.168.1.1: icmp_seq=0 ttl=64 time=2.508 ms"
+    assert scan.ttl_hint("192.168.1.1", runner=fake_runner(line)) == scan.os_family(64)
+
+
+def test_a_host_that_drops_icmp_has_no_hint_rather_than_a_wrong_one():
+    assert scan.ttl_hint("192.168.1.9", runner=fake_runner("")) == ""
+
+
+def fake_runner(stdout):
+    class Result:
+        returncode = 0
+
+    Result.stdout = stdout
+    return lambda *a, **k: Result()
+
+
 @pytest.fixture
 def conn(tmp_path):
     return store.connect(tmp_path / "history.db")
@@ -240,12 +315,13 @@ def test_scan_roundtrips_through_the_database(conn):
             vendor="Acme",
             services="Chromecast",
             ports=(22, 80),
+            os_hint="Linux, macOS or BSD? (TTL 64)",
         ),
         Device(mac="aa:bb:cc:00:00:02", ip="192.168.1.11", hostname="nas.local"),
     ]
     scan_id = store.record_scan(conn, "192.168.1.0/24", devices)
     assert store.load_scan(conn, scan_id) == devices, (
-        "ports, services and blanks must survive the trip"
+        "ports, services, the OS hint and blanks must survive the trip"
     )
 
 
