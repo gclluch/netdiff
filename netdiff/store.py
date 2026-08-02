@@ -38,7 +38,15 @@ CREATE TABLE IF NOT EXISTS findings (
     device    TEXT NOT NULL,
     title     TEXT NOT NULL,
     evidence  TEXT NOT NULL,
-    PRIMARY KEY (scan_id, rule, device, title)
+    -- Evidence is in the key because rule/device/title alone are not unique: a
+    -- TCP and a UDP forward on the same external port produce the identical
+    -- title, and the two collapsed into one row. The evidence is `str(Mapping)`,
+    -- which carries the protocol, so it is what separates them.
+    --
+    -- ponytail: a database written before this change keeps its old primary key
+    -- - ALTER TABLE cannot change one, and the only consequence is the same
+    -- duplicate being dropped as before. Not worth a table rebuild for.
+    PRIMARY KEY (scan_id, rule, device, title, evidence)
 );
 """
 

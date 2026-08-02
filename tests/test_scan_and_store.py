@@ -443,13 +443,18 @@ def test_first_seen_survives_the_device_changing_ip(conn):
     assert store.first_seen(conn, "aa:bb:cc:00:00:01") is not None
 
 
-def find(rule="plaintext-protocol", device="192.168.1.10", title="Telnet on port 23"):
+def find(
+    rule="plaintext-protocol",
+    device="192.168.1.10",
+    title="Telnet on port 23",
+    evidence="banner",
+):
     return Finding(
         rule=rule,
         severity="high",
         device=device,
         title=title,
-        evidence="banner",
+        evidence=evidence,
         why="w",
         fix="f",
         verify="v",
@@ -471,6 +476,27 @@ def test_two_findings_of_one_rule_on_one_device_do_not_collide(conn):
         conn, scan_id, [find(title="Telnet on port 23"), find(title="FTP on port 21")]
     )
     assert len(store.finding_keys(conn, scan_id)) == 2
+
+
+def test_two_forwards_differing_only_in_protocol_are_both_kept(conn):
+    """A TCP and a UDP forward on the same external port are two doors.
+
+    Their rule, device and title are identical - only the evidence, which is the
+    router's own `str(Mapping)` line, carries the protocol. Without evidence in
+    the primary key the second silently replaced the first, and the audit that
+    the database recorded was not the audit that was printed.
+    """
+    scan_id = store.record_scan(conn, "192.168.1.0/24", [])
+    store.record_findings(
+        conn,
+        scan_id,
+        [
+            find(title="port 8080 forwarded", evidence="*:8080/tcp -> 192.168.1.10:80"),
+            find(title="port 8080 forwarded", evidence="*:8080/udp -> 192.168.1.10:80"),
+        ],
+    )
+    rows = conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0]
+    assert rows == 2
 
 
 def test_a_repeat_audit_finds_nothing_new(conn):

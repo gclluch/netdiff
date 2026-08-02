@@ -186,6 +186,18 @@ def test_an_empty_txt_string_is_dropped_rather_than_keyed_on_nothing():
     assert mdns.parse_records(data)[0][2] == {"a": "b"}
 
 
+def test_a_txt_string_longer_than_its_rdata_is_dropped_not_truncated():
+    """The same class of input `parse_records` already refuses one level up.
+
+    Truncating gives `model=Mac`, which is a confident wrong answer where the
+    honest outcome is no answer. Everything read before the bad length is kept:
+    it was well-formed, and one lying string is not grounds to discard the rest.
+    """
+    rdata = b"\x03a=b" + b"\x40model=Mac15,7"  # claims 64 bytes, carries 13
+    data = message(record("tv.local", mdns.TYPE_TXT, rdata))
+    assert mdns.parse_records(data)[0][2] == {"a": "b"}
+
+
 # --- describing a device -----------------------------------------------------
 
 
